@@ -2,20 +2,20 @@
   "extension_name": "유튜브 자동 건너뛰기",
   "extension_id": "oilfjmphaeclhghjdiflbolddhdokimh",
   "publisher_id": "1c3467ca-1ed5-46e9-b508-4f6bc1e03a60",
-  "source_version": "1.0.6",
-  "submitted_version": "1.0.6.9",
+  "source_version": "1.0.7",
+  "submitted_version": "1.0.7.11",
   "submitted_on": "2026-11-02",
   "confirmed_status": "PENDING_REVIEW",
   "confirmed_status_label": "공개 배포 심사 대기 중",
-  "confirmed_at_utc": "2026-11-02T08:11:15.583Z",
+  "confirmed_at_utc": "2026-11-02T09:13:02Z",
   "confirmation_source": "Read-only Chrome Web Store API v2 fetchStatus in GitHub Actions",
   "latest_status_check": {
-    "workflow_run_id": "41411182090",
-    "workflow_url": "https://github.com/knj-arch/youtube-auto-skip/actions/runs/41411182090",
-    "checked_at_kst": "2026-11-02 17:11:15 KST",
+    "workflow_run_id": "41418810362",
+    "workflow_url": "https://github.com/knj-arch/youtube-auto-skip/actions/runs/41418810362",
+    "checked_at_kst": "2026-11-02 18:13:02 KST",
     "published_version": "1.0.5.8",
     "published_state": "PUBLISHED_TO_TESTERS",
-    "submitted_version": "1.0.6.9",
+    "submitted_version": "1.0.7.11",
     "submitted_state": "PENDING_REVIEW",
     "taken_down": false,
     "warned": false
@@ -26,22 +26,15 @@
     "debugger"
   ],
   "package": {
-    "version": "1.0.6.9",
-    "bytes": 26945,
-    "sha256": "DCEA236C7AD204776A17A8DD7BB7D405E1D575CEF34A84053C3C61EDE4F88479",
-    "runtime_files": 10,
-    "matches_verified_source": true,
-    "allowed_differences": [
-      "manifest.version",
-      "manifest JSON formatting",
-      "text line endings"
-    ]
+    "version": "1.0.7.11",
+    "bytes": 27257,
+    "sha256": "E1BC1B6FFE75D595CDB8095B68E307E24D4AAA150BDCC3CED00C085E2384332E",
+    "source": "CI artifact extension-11 of run 41417871816 (commit 9952eb2a8fbbf06de6a429315005f78c6a177ada)"
   },
   "verification": {
     "strict_typecheck_passed": true,
-    "node_checks_passed": 161,
+    "node_checks_passed": 162,
     "browser_fixture_checks_passed": 19,
-    "aside_background_checks_passed": 6,
     "aside_modes": [
       "background-tab",
       "unfocused-window",
@@ -64,7 +57,26 @@
     "live_ad_reload_to_main_confirmed": false,
     "live_continue_prompt_confirmed": false,
     "other_pc_fix_confirmed": false,
-    "limitations": "The 1.0.6 browser tests use local YouTube-shaped fixtures and playable local media. They do not claim a naturally occurring YouTube ad or inactivity prompt observation. Aside tests use the actual Aside executable and native OS minimization. Media decoding is bootstrapped with temporary focus emulation, then removed before the background scenario. Input temporarily emulates renderer focus; native focus and hidden state are verified after cleanup. The installed Aside user profile has not yet been updated."
+    "limitations": "The 1.0.6 browser tests use local YouTube-shaped fixtures and playable local media. They do not claim a naturally occurring YouTube ad or inactivity prompt observation. Aside tests use the actual Aside executable and native OS minimization. Media decoding is bootstrapped with temporary focus emulation, then removed before the background scenario. Input temporarily emulates renderer focus; native focus and hidden state are verified after cleanup. The installed Aside user profile has not yet been updated.",
+    "background_fixture_checks_passed": 6,
+    "background_fixture_browser": "Playwright chromium-1243",
+    "youtube_style_fade_in_skip_button_verified_on_fixtures": true,
+    "skip_latency_p50_p95_ms": {
+      "foreground": [
+        8,
+        10
+      ],
+      "background_tab": [
+        9,
+        10
+      ],
+      "minimized_window": [
+        8,
+        10
+      ]
+    },
+    "reload_served_to_next_request_p50_ms": 44,
+    "live_youtube_minimized_skip_confirmed": false
   },
   "automation": {
     "configured": true,
@@ -78,13 +90,13 @@
     "service_account_json_key_created": false,
     "personal_oauth_refresh_token_stored": false,
     "billing_connected_at_setup": false,
-    "workflow_run_id": "41409795359",
-    "workflow_run_number": 9,
+    "workflow_run_id": "41417871816",
+    "workflow_run_number": 11,
     "workflow_event": "push",
     "workflow_conclusion": "success",
-    "source_commit": "5c185cbc80e3cd007fd977309cf27d093256be23",
-    "workflow_url": "https://github.com/knj-arch/youtube-auto-skip/actions/runs/41409795359",
-    "submission_accepted_at_utc": "2026-11-02T08:10:34.2648347Z",
+    "source_commit": "9952eb2a8fbbf06de6a429315005f78c6a177ada",
+    "workflow_url": "https://github.com/knj-arch/youtube-auto-skip/actions/runs/41417871816",
+    "submission_accepted_at_utc": "2026-11-02T09:12:30.9537703Z",
     "workflow_attempt": 2
   },
   "manual_release": {
@@ -97,11 +109,14 @@
     "anonymous_download_hash_verified": true
   },
   "replaced_submission": {
-    "version": "1.0.4.7",
+    "version": "1.0.6.9",
     "state": "CANCELLED",
-    "reason": "Replace with verified strict TypeScript build and faster ad/player detection while preserving safety guards.",
-    "confirmed_at_kst": "2026-10-28 16:41:17 KST",
-    "workflow_run_id": "40651671700"
+    "reason": "Replace with 1.0.7: minimized-window skip fix, immediate reloads, ~10ms background skip latency",
+    "method": "Chrome Web Store API v2 cancelSubmission via the store-cancel workflow (named-version check)",
+    "confirmed_at_utc": "2026-11-02T09:11:19.097Z",
+    "confirmed_at_kst": "2026-11-02 18:11:19 KST",
+    "workflow_run_id": "41418528688",
+    "workflow_url": "https://github.com/knj-arch/youtube-auto-skip/actions/runs/41418528688"
   },
   "visibility": "PUBLIC",
   "price": "FREE",
