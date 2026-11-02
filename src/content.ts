@@ -1,7 +1,9 @@
+import { findContinueTarget } from "./continue-dialog";
+
 (() => {
   "use strict";
 
-  type Operation = "ad-reload-state" | "reload-ad" | "skip-ad";
+  type Operation = "ad-reload-state" | "reload-ad" | "skip-ad" | "continue-video";
   interface ActionResult { operation: Operation; ok: boolean; reason: string; at: number }
   interface VideoState {
     id: string;
@@ -13,6 +15,7 @@
     nextStateReadAt: number;
     lastMainTime: number;
     nextReloadAttempt: number;
+    nextContinueAttempt?: number;
     resumeTime?: number;
     resumeDeadline?: number;
     mainReadySince?: number;
@@ -22,7 +25,7 @@
   interface ContentDiagnostics {
     connected: true; build: string; supported: boolean; enabled: boolean;
     visibility: DocumentVisibilityState; focused: boolean;
-    players: number; adPlayers: number; skipButtons: number; eligibleSkipButtons: number;
+    players: number; adPlayers: number; playingAd: boolean; continueAvailable: boolean; skipButtons: number; eligibleSkipButtons: number;
     state: Pick<VideoState, "ready" | "reloadCount" | "refreshUnavailable" | "reloading"> &
       { nextReloadMs: number } | null;
     lastResult?: Omit<ActionResult, "at"> & { ageMs: number };
@@ -40,6 +43,7 @@
   }
 
   const PLAYER_SELECTOR = ".html5-video-player";
+  const CONTINUE_SELECTOR = 'ytd-confirm-dialog-renderer, yt-confirm-dialog-renderer, tp-yt-paper-dialog, [role="dialog"]';
   const SKIP_SELECTOR = [
     "button.ytp-skip-ad-button",
     "button.ytp-ad-skip-button-modern",
@@ -54,6 +58,7 @@
   const MAIN_VIDEO_SETTLE_MS = 500;
   const RESUME_TIMEOUT_MS = 15000;
   const VISUAL_EVENTS = ["transitionstart", "transitionend", "animationstart", "animationend"];
+  const MEDIA_EVENTS = ["timeupdate", "loadedmetadata", "loadeddata", "playing", "play", "seeked"];
   const SCRIPT_VERSION = chrome.runtime.getManifest().version;
   const RESULT_REASONS = new Set(["ok", "timeout", "failed", "busy", "inactive", "disabled",
     "document-changed", "ad-not-showing", "reload-state-unavailable", "retry-later", "reload-limit",
@@ -90,14 +95,21 @@
       return;
     }
     if (message?.type !== "confirm-skip-document") return;
-    const adShowing = Boolean(document.querySelector(
+    const adPlayers = Array.from(document.querySelectorAll(
       ".html5-video-player.ad-showing, .html5-video-player.ad-interrupting"
     ));
+    const adShowing = adPlayers.length > 0;
+    const playingAd = adPlayers.some(isPlaying);
+    const continueAvailable = message.requireContinue === true && findContinueTarget() !== null;
     respond({
-      ok: enabled && location.href === message.url && document.visibilityState === "visible" &&
-        document.hasFocus() && (!message.requireAd || adShowing),
+      ok: enabled && location.href === message.url &&
+        (message.requireContinue === true ? continueAvailable : (isForeground() || playingAd)) &&
+        (!message.requireAd || adShowing),
       url: location.href,
-      adShowing
+      adShowing,
+      playingAd,
+      foreground: isForeground(),
+      continueAvailable
     });
   });
 
@@ -112,6 +124,16 @@
 
   function isCurrent(state: VideoState) {
     return enabled && videoState === state && watchVideoId() === state.id;
+  }
+
+  function isForeground() {
+    return document.visibilityState === "visible" && document.hasFocus();
+  }
+
+  function isPlaying(player: Element) {
+    const video = player.querySelector<HTMLVideoElement>("video.html5-main-video") || player.querySelector("video");
+    return Boolean(player.isConnected && video && video.paused === false &&
+      video.ended === false && video.readyState >= 2);
   }
 
   function recordResult(state: VideoState, operation: Operation, value: unknown, fallback = "no-response") {
@@ -129,6 +151,8 @@
     const result: ContentDiagnostics = { connected: true, build: SCRIPT_VERSION, supported: Boolean(watchVideoId()), enabled,
       visibility: document.visibilityState, focused: document.hasFocus(), players: currentPlayers.length,
       adPlayers: currentPlayers.filter(player => player.matches(".ad-showing, .ad-interrupting")).length,
+      playingAd: currentPlayers.some(player => player.matches(".ad-showing, .ad-interrupting") && isPlaying(player)),
+      continueAvailable: findContinueTarget() !== null,
       skipButtons: candidates.length,
       eligibleSkipButtons: candidates.filter(button => canClick(button, button.closest(PLAYER_SELECTOR))).length,
       state: current ? { ready: current.ready, reloadCount: current.reloadCount,
@@ -155,7 +179,6 @@
 
   function readReloadState(state: VideoState | undefined) {
     if (!state || !isCurrent(state) || state.ready || state.stateReadInFlight ||
-        document.visibilityState !== "visible" || !document.hasFocus() ||
         Date.now() < state.nextStateReadAt) return;
     state.stateReadInFlight = true;
     state.nextStateReadAt = Date.now() + STATE_READ_RETRY_MS;
@@ -236,7 +259,7 @@
       } else {
         state.mainReadySince ??= Date.now();
         if (Date.now() - state.mainReadySince < MAIN_VIDEO_SETTLE_MS ||
-            document.visibilityState !== "visible" || !document.hasFocus() || video.seeking ||
+            video.seeking ||
             state.resumeTime > video.duration) return;
         const target = Math.min(state.resumeTime, Math.max(0, video.duration - 0.25));
         try {
@@ -319,8 +342,7 @@
   }
 
   function scanPlayers() {
-    if (!enabled || requestInFlight || document.visibilityState !== "visible" ||
-        !document.hasFocus() || location.pathname !== "/watch") return;
+    if (!enabled || requestInFlight || location.pathname !== "/watch") return;
 
     // Reloading/removing an extension invalidates its old content scripts.
     try {
@@ -334,7 +356,17 @@
     }
 
     const state = syncVideoState();
-    if (state) state.lastForeground = { at: Date.now(),
+    if (state && !state.reloading && Date.now() >= (state.nextContinueAttempt || 0) && findContinueTarget()) {
+      state.nextContinueAttempt = Date.now() + 3000;
+      const request = { state };
+      requestInFlight = request;
+      chrome.runtime.sendMessage({ type: "continue-video", url: location.href })
+        .then(reply => recordResult(state, "continue-video", reply))
+        .catch(() => recordResult(state, "continue-video", undefined, "message-failed"))
+        .finally(() => { if (requestInFlight === request) requestInFlight = undefined; });
+      return;
+    }
+    if (state && isForeground()) state.lastForeground = { at: Date.now(),
       adPlayers: [...players.keys()].filter(player => player.isConnected &&
         player.matches(".ad-showing, .ad-interrupting")).length };
     if (!state || state.reloading || (!state.ready && !state.refreshUnavailable)) return;
@@ -343,6 +375,9 @@
       if (!player.isConnected) continue;
       inspectMainVideo(player, state);
       if (!player.matches(".ad-showing, .ad-interrupting")) continue;
+      // Hidden/unfocused pages may act only on media that is actually playing.
+      // Keep paused background tabs alone; never activate their tab or window.
+      if (!isForeground() && !isPlaying(player)) continue;
 
       // Retry while the user's persisted budget remains. After the limit,
       // wait for an eligible skip button instead of refreshing indefinitely.
@@ -402,7 +437,10 @@
   }
 
   function discoverPlayers(records: MutationRecord[]) {
-    if (!enabled || !watchVideoId() || document.visibilityState !== "visible" || !document.hasFocus()) return;
+    if (!enabled || !watchVideoId()) return;
+    if (records.some(mutation =>
+      (mutation.target.nodeType === 1 && (mutation.target as Element).closest(CONTINUE_SELECTOR)) ||
+      [...mutation.addedNodes].some(node => containsElement(node, CONTINUE_SELECTOR)))) scheduleScan();
     if ([...players.keys()].some(player => !player.isConnected)) {
       scheduleReconcile();
       return;
@@ -436,8 +474,7 @@
   }
 
   function onVisualTransition(event: Event) {
-    if (!enabled || document.visibilityState !== "visible" || !document.hasFocus() ||
-        !isElementTarget(event.target)) return;
+    if (!enabled || !isElementTarget(event.target)) return;
     const target = event.target;
     const player = target.closest(PLAYER_SELECTOR);
     if (!player || !players.has(player) || !player.matches(".ad-showing, .ad-interrupting") ||
@@ -499,13 +536,14 @@
         if (event.type === "loadedmetadata" && current &&
             !player.matches(".ad-showing, .ad-interrupting")) mediaVideoId = current.id;
         inspectMainVideo(player, current);
+        if (player.matches(".ad-showing, .ad-interrupting")) scheduleScan();
       };
-      for (const type of ["timeupdate", "loadedmetadata", "seeked"]) video.addEventListener(type, sample);
+      for (const type of MEDIA_EVENTS) video.addEventListener(type, sample);
       videos.set(video, sample);
     }
     for (const [video, sample] of videos) {
       if (currentVideos.has(video)) continue;
-      for (const type of ["timeupdate", "loadedmetadata", "seeked"]) video.removeEventListener(type, sample);
+      for (const type of MEDIA_EVENTS) video.removeEventListener(type, sample);
       videos.delete(video);
     }
     // This also catches CSS transitions and players replaced during navigation.
@@ -529,7 +567,7 @@
     for (const observer of players.values()) observer.disconnect();
     players.clear();
     for (const [video, sample] of videos) {
-      for (const type of ["timeupdate", "loadedmetadata", "seeked"]) video.removeEventListener(type, sample);
+      for (const type of MEDIA_EVENTS) video.removeEventListener(type, sample);
     }
     videos.clear();
   }
@@ -540,7 +578,8 @@
     if (!enabled) return;
     for (const type of VISUAL_EVENTS) document.addEventListener(type, onVisualTransition, true);
     discoveryObserver = new MutationObserver(discoverPlayers);
-    discoveryObserver.observe(document, { childList: true, subtree: true });
+    discoveryObserver.observe(document, { childList: true, subtree: true, attributes: true,
+      attributeFilter: ["hidden", "opened", "aria-hidden", "style"] });
     reconcilePlayers();
     intervalId = setInterval(reconcilePlayers, 1000);
   }
@@ -558,9 +597,7 @@
     }
   });
 
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") reconcilePlayers();
-  });
+  document.addEventListener("visibilitychange", reconcilePlayers);
   document.addEventListener("yt-navigate-finish", reconcilePlayers);
   window.addEventListener("focus", reconcilePlayers);
 

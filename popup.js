@@ -159,7 +159,7 @@
     "no-response",
     "message-failed"
   ]);
-  var diagnosticOperations = /* @__PURE__ */ new Set(["ad-reload-state", "reload-ad", "skip-ad", "ad-resume-complete"]);
+  var diagnosticOperations = /* @__PURE__ */ new Set(["ad-reload-state", "reload-ad", "skip-ad", "continue-video", "ad-resume-complete"]);
   var diagnosticInFlight = false;
   var diagnosticJson = "";
   function diagnosticObject(value) {
@@ -242,6 +242,8 @@
         enabled: diagnosticBoolean(content["enabled"]),
         visibility: diagnosticVisibility(content["visibility"]),
         focused: diagnosticBoolean(content["focused"]),
+        playingAd: diagnosticBoolean(content["playingAd"]),
+        continueAvailable: diagnosticBoolean(content["continueAvailable"]),
         players: diagnosticNumber(content["players"], true),
         adPlayers: diagnosticNumber(content["adPlayers"], true),
         skipButtons: diagnosticNumber(content["skipButtons"], true),
@@ -293,13 +295,12 @@
     }
     if (content.state.refreshUnavailable === true) return "새로고침을 진행하지 못했어요. 결과를 복사해 주세요.";
     if (content.state.reloading === true) return "광고를 감지해 새로고침하는 중이에요.";
-    if (content.adPlayers > 0 && report.maxReloads !== null && content.state.reloadCount !== null && content.state.reloadCount >= report.maxReloads) return positive(content.eligibleSkipButtons) ? "건너뛰기 버튼 감지됨 — 팝업을 닫으면 자동 처리돼요." : "새로고침 한도 도달 — 건너뛰기 버튼을 기다리고 있어요.";
-    const foreground = content.lastForeground;
-    const recentlyForeground = foreground?.focused === true && foreground.ageMs !== null && foreground.ageMs <= 1e4;
-    if ((page.active === false || page.windowFocused === false) && !recentlyForeground) {
-      return "유튜브 영상 탭을 보고 있을 때 자동으로 동작해요.";
+    if (content.continueAvailable === true) return "계속 시청 확인창 감지됨 — 자동으로 확인해요.";
+    if ((page.active === false || page.windowFocused === false || content.visibility === "hidden") && content.adPlayers > 0 && content.playingAd === false) {
+      return "백그라운드에서는 재생 중인 광고만 처리해요. 영상 재생을 확인해 주세요.";
     }
-    if (content.adPlayers > 0) return positive(content.state.nextReloadMs) ? "광고 감지됨 — 다음 새로고침을 기다리고 있어요." : "광고 감지됨 — 영상을 보는 동안 자동으로 처리해요.";
+    if (content.adPlayers > 0 && report.maxReloads !== null && content.state.reloadCount !== null && content.state.reloadCount >= report.maxReloads) return positive(content.eligibleSkipButtons) ? "건너뛰기 버튼 감지됨 — 재생 중이면 자동 처리돼요." : "새로고침 한도 도달 — 건너뛰기 버튼을 기다리고 있어요.";
+    if (content.adPlayers > 0) return positive(content.state.nextReloadMs) ? "광고 감지됨 — 다음 새로고침을 기다리고 있어요." : "광고 감지됨 — 백그라운드에서도 재생 중이면 자동으로 처리해요.";
     if (content.players === 0) return page.loading === true ? "영상 플레이어 연결 대기 중 — 페이지를 불러오는 중이면 잠시 후 다시 확인해 주세요." : "영상 플레이어 연결 대기 중 — 페이지를 새로고침한 뒤 다시 확인해 주세요.";
     return "광고 감지 대기 중";
   }

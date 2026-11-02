@@ -24,7 +24,7 @@ function harness(options = {}) {
   const calls = [], seeks = [], observers = [], timers = new Map();
   let now = 10000, nextTimer = 0, href = options.url || WATCH, mediaTime = options.time || 0;
   const state = { focused: true, covered: false, button: options.button !== false, ...options.state };
-  const video = eventTarget({ nodeType: 1, readyState: 1, duration: 600, seeking: false,
+  const video = eventTarget({ nodeType: 1, readyState: 1, paused: true, ended: false, duration: 600, seeking: false,
     matches: selector => selector === "video", querySelector: () => null });
   Object.defineProperty(video, "currentTime", {
     get: () => mediaTime,
@@ -47,7 +47,7 @@ function harness(options = {}) {
   };
   const document = eventTarget({
     nodeType: 9, visibilityState: "visible", hasFocus: () => state.focused,
-    querySelectorAll() { return player.isConnected ? [player] : []; },
+    querySelectorAll(selector) { return selector.includes("dialog") ? [] : player.isConnected && (!selector.includes(".ad-showing") || player.ad) ? [player] : []; },
     querySelector() { return player.isConnected && player.ad ? player : null; },
     elementFromPoint() { return state.covered ? {} : button; }
   });
@@ -285,6 +285,59 @@ test("disabled, unfocused, hidden, non-watch, and covered fallback states do not
   assert.deepEqual(hidden.actions(), []);
 });
 
+test("playing hidden and unfocused ads reload and fall back to skip without activation", async () => {
+  for (const hidden of [false, true]) {
+    for (const reloadCount of [0, 3]) {
+      const h = harness({ reloadCount, state: { focused: false } });
+      if (hidden) h.document.visibilityState = "hidden";
+      Object.assign(h.video, { paused: false, readyState: 4 });
+      await h.advance(100);
+      assert.deepEqual(h.actions().map(message => message.type), [reloadCount === 0 ? "reload-ad" : "skip-ad"]);
+      assert.equal(h.state.focused, false);
+      assert.equal(h.confirm(true).playingAd, true);
+      assert.equal(h.confirm(true).ok, true);
+      h.video.paused = true;
+      assert.equal(h.confirm(true).ok, false);
+    }
+  }
+});
+
+test("background playback events trigger a scan while paused, ended and unready media stay idle", async () => {
+  for (const media of [{ paused: true, readyState: 4 }, { paused: false, ended: true, readyState: 4 },
+    { paused: false, readyState: 1 }]) {
+    const h = harness({ state: { focused: false } });
+    h.document.visibilityState = "hidden";
+    Object.assign(h.video, media);
+    await h.advance(100);
+    assert.deepEqual(h.actions(), []);
+    Object.assign(h.video, { paused: false, ended: false, readyState: 4 });
+    h.video.emit("playing");
+    await flush();
+    assert.deepEqual(h.actions().map(message => message.type), ["reload-ad"]);
+  }
+});
+
+test("a newly discovered playing ad in a hidden document is handled immediately", async () => {
+  const h = harness({ playerPresent: false, state: { focused: false } });
+  h.document.visibilityState = "hidden";
+  Object.assign(h.video, { paused: false, readyState: 4 });
+  await h.advance(100);
+  h.attachPlayer();
+  await flush();
+  assert.deepEqual(h.actions().map(message => message.type), ["reload-ad"]);
+});
+
+test("background main-video restoration keeps the saved position and does not restore into an ad", async () => {
+  const h = harness({ state: { focused: false }, reloaded: true, resumeTime: 120 });
+  h.document.visibilityState = "hidden";
+  await h.advance(100);
+  assert.deepEqual(h.seeks, []);
+  h.ad(false);
+  h.video.emit("loadedmetadata");
+  await h.advance(1200);
+  assert.deepEqual(h.seeks, [120]);
+});
+
 test("turning off cancels scans and a delayed state reply cannot restart them", async () => {
   let resolve;
   const delayed = new Promise(done => { resolve = done; });
@@ -433,7 +486,7 @@ test("state retries preserve the stored attempt cap and its remaining retry inte
   assert.deepEqual(h.actions().map(message => message.type), ["reload-ad"]);
 });
 
-test("focus and visibility activation resume failed state reads without reading in the background", async () => {
+test("failed state reads recover in the background without acting on paused media", async () => {
   for (const hidden of [false, true]) {
     let reads = 0;
     const h = harness({ button: false, reloadState: () => ++reads === 1 ? undefined :
@@ -442,7 +495,7 @@ test("focus and visibility activation resume failed state reads without reading 
     if (hidden) h.document.visibilityState = "hidden";
     else h.state.focused = false;
     await h.advance(10000);
-    assert.equal(reads, 1);
+    assert.equal(reads, 2);
     assert.deepEqual(h.actions(), []);
     if (hidden) {
       h.document.visibilityState = "visible";
@@ -457,12 +510,12 @@ test("focus and visibility activation resume failed state reads without reading 
   }
 });
 
-test("an initially hidden or unfocused page waits until activation before its first state read", async () => {
+test("an initially hidden or unfocused page reads its guard but leaves paused media alone", async () => {
   for (const hidden of [false, true]) {
     const h = harness({ button: false, state: { focused: hidden } });
     if (hidden) h.document.visibilityState = "hidden";
     await h.advance(5000);
-    assert.equal(h.calls.length, 0);
+    assert.deepEqual(h.calls.map(message => message.type), ["ad-reload-state"]);
     if (hidden) {
       h.document.visibilityState = "visible";
       h.document.emit("visibilitychange");

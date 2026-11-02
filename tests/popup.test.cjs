@@ -197,7 +197,7 @@ test("loading is supplementary only while waiting for a connection or a player",
   assert.match(missing.element("diagnostic-status").textContent, /유튜브 연결 대기 중/);
 });
 
-test("an eligible skip after the budget recommends closing the popup", async () => {
+test("an eligible skip after the budget explains playback without requiring focus", async () => {
   const reply = success();
   reply.page.loading = true;
   reply.content.focused = false;
@@ -205,7 +205,7 @@ test("an eligible skip after the budget recommends closing the popup", async () 
   reply.content.eligibleSkipButtons = 1;
   const h = harness({ reply: () => reply });
   await h.check();
-  assert.equal(h.element("diagnostic-status").textContent, "건너뛰기 버튼 감지됨 — 팝업을 닫으면 자동 처리돼요.");
+  assert.equal(h.element("diagnostic-status").textContent, "건너뛰기 버튼 감지됨 — 재생 중이면 자동 처리돼요.");
 });
 
 test("an unavailable reload is reported even after its counter was read successfully", async () => {
@@ -250,6 +250,21 @@ test("the report removes private fields and does not preserve arbitrary strings 
   assert.equal(report.content.lastResult.reason, "unknown");
   assert.equal(report.content.lastResult.ageMs, null);
   assert.match(h.element("diagnostic-status").textContent, /상태 일부/);
+});
+
+test("background diagnostics distinguish paused ads from eligible playing ads", async () => {
+  for (const playingAd of [false, true]) {
+    const reply = success();
+    reply.page.active = false;
+    reply.page.windowFocused = false;
+    reply.content.visibility = "hidden";
+    reply.content.playingAd = playingAd;
+    reply.content.adPlayers = 1;
+    const h = harness({ reply: () => reply });
+    await h.check();
+    assert.equal(h.report().content.playingAd, playingAd);
+    assert.match(h.element("diagnostic-status").textContent, playingAd ? /자동으로 처리/ : /영상 재생을 확인/);
+  }
 });
 
 test("the content diagnostic reason codes survive the report whitelist", async () => {

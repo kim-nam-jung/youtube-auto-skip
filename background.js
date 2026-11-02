@@ -1,6 +1,36 @@
 // Generated from src/*.ts by npm run build. Edit the TypeScript source.
 "use strict";
 (() => {
+  // src/continue-dialog.ts
+  function findContinueTarget() {
+    const url = new URL(location.href);
+    if (url.origin !== "https://www.youtube.com" || url.pathname !== "/watch" || !url.searchParams.get("v")) return null;
+    const video = document.querySelector(".html5-video-player video");
+    if (!video || video.paused !== true || video.ended === true) return null;
+    const selector = 'ytd-confirm-dialog-renderer, yt-confirm-dialog-renderer, tp-yt-paper-dialog, [role="dialog"]';
+    for (const dialog of document.querySelectorAll(selector)) {
+      const text = (dialog.textContent || "").replace(/\s+/g, " ").trim();
+      if (!/Video paused\.\s*Continue watching\?/i.test(text) && !/(?:동영상|영상)이 일시\s*중지되었습니다\.\s*계속 시청(?:하시겠어요|할까요)\?/.test(text)) continue;
+      for (const button of dialog.querySelectorAll('button, [role="button"], tp-yt-paper-button')) {
+        const label = (button.textContent || "").replace(/\s+/g, " ").trim();
+        if (!/^(?:확인|예|계속|계속 시청|Yes|Continue|OK)$/i.test(label) || button.closest(selector) !== dialog || !button.isConnected || button.matches(":disabled") || button.closest('[hidden], [inert], [aria-disabled="true"], [aria-hidden="true"]')) continue;
+        const style = getComputedStyle(button);
+        if (style.visibility !== "visible" || style.pointerEvents === "none" || !button.getClientRects().length) continue;
+        let hidden = false;
+        for (let ancestor = button; ancestor; ancestor = ancestor.parentElement) {
+          const css = getComputedStyle(ancestor);
+          if (css.display === "none" || css.contentVisibility === "hidden" || Number(css.opacity) === 0) hidden = true;
+        }
+        if (hidden) continue;
+        const r = button.getBoundingClientRect(), x = r.x + r.width / 2, y = r.y + r.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        if (r.width <= 0 || r.height <= 0 || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight || !hit || hit !== button && !button.contains(hit)) continue;
+        return { x, y, href: location.href };
+      }
+    }
+    return null;
+  }
+
   // src/background.ts
   var OPERATION_TIMEOUT_MS = 2e3;
   var RELOAD_OPERATION_TIMEOUT_MS = 1e4;
@@ -14,7 +44,7 @@
   var lastActions = /* @__PURE__ */ new Map();
   var automationPaused = false;
   function findSkipTarget() {
-    if (self !== top || location.origin !== "https://www.youtube.com" || location.pathname !== "/watch" || document.visibilityState !== "visible") return null;
+    if (self !== top || location.origin !== "https://www.youtube.com" || location.pathname !== "/watch") return null;
     const selector = [
       "button.ytp-skip-ad-button",
       "button.ytp-ad-skip-button-modern",
@@ -24,6 +54,10 @@
       '[role="button"].ytp-ad-skip-button'
     ].join(",");
     for (const player of document.querySelectorAll(".html5-video-player.ad-showing, .html5-video-player.ad-interrupting")) {
+      if (document.visibilityState !== "visible" || !document.hasFocus()) {
+        const video = player.querySelector("video.html5-main-video") || player.querySelector("video");
+        if (!video || video.paused !== false || video.ended !== false || video.readyState < 2) continue;
+      }
       for (const button of player.querySelectorAll(selector)) {
         if (!button.isConnected || button.closest(".html5-video-player") !== player || button.matches(":disabled") || button.closest('[hidden], [inert], [aria-disabled="true"], [aria-hidden="true"]')) continue;
         const style = getComputedStyle(button);
@@ -45,6 +79,7 @@
     return null;
   }
   var TARGET_EXPRESSION = "(" + findSkipTarget.toString() + ")()";
+  var CONTINUE_EXPRESSION = "(" + findContinueTarget.toString() + ")()";
   var StopOperation = class extends Error {
     constructor(reason) {
       super(reason);
@@ -80,7 +115,7 @@
     return ids.length === 1 && typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : null;
   }
   function permittedRequest(message) {
-    return isRecord(message) && (message.type === "skip-ad" || message.type === "reload-ad" || message.type === "ad-reload-state" || message.type === "ad-resume-complete") && isWatchUrl(message.url) && (message.type === "skip-ad" || watchVideoId(message.url) !== null);
+    return isRecord(message) && (message.type === "skip-ad" || message.type === "reload-ad" || message.type === "continue-video" || message.type === "ad-reload-state" || message.type === "ad-resume-complete") && isWatchUrl(message.url) && (message.type === "skip-ad" || watchVideoId(message.url) !== null);
   }
   function permittedSender(sender) {
     return sender.id === chrome.runtime.id && sender.frameId === 0 && typeof sender.documentId === "string" && sender.documentId.length > 0 && sender.documentId.length <= 128 && (!sender.documentLifecycle || sender.documentLifecycle === "active") && isInteger(sender.tab?.id) && sender.tab.id >= 0 && isInteger(sender.tab.windowId) && sender.tab.windowId >= 0 && isYoutubeUrl(sender.url);
@@ -130,6 +165,13 @@
         });
         job.pressed = false;
       }
+      if (job.focusEmulated) {
+        await chrome.debugger.sendCommand({ tabId: job.tabId }, "Emulation.setFocusEmulationEnabled", {
+          enabled: false
+        }).catch(() => {
+        });
+        job.focusEmulated = false;
+      }
       job.ownDetach = true;
       try {
         await chrome.debugger.detach({ tabId: job.tabId });
@@ -146,7 +188,8 @@
     })();
     return job.cleanupPromise;
   }
-  async function checkDocumentAndForeground(job, requireAd = false) {
+  async function checkDocumentAndPlayback(job) {
+    const requireContinue = job.kind === "continue-video";
     const [settings, tab, windowInfo, confirmation] = await step(job, () => Promise.all([
       readSettings(),
       chrome.tabs.get(job.tabId),
@@ -156,17 +199,20 @@
         {
           type: "confirm-skip-document",
           url: job.url,
-          ...requireAd ? { requireAd: true } : {}
+          ...requireContinue ? { requireContinue: true } : { requireAd: true }
         },
         { documentId: job.documentId, frameId: 0 }
       )
     ]));
     if (settings.enabled === false) throw new StopOperation("disabled");
-    if (!tab.active || tab.windowId !== job.windowId || !windowInfo.focused || tab.discarded || tab.frozen) throw new StopOperation("inactive");
+    if (tab.windowId !== job.windowId || tab.discarded || tab.frozen) throw new StopOperation("inactive");
+    job.backgroundPlaybackRequired ||= !tab.active || !windowInfo.focused || windowInfo.state === "minimized" || isRecord(confirmation) && confirmation.foreground === false;
+    if (!requireContinue && job.backgroundPlaybackRequired && (!isRecord(confirmation) || confirmation.playingAd !== true)) throw new StopOperation("inactive");
     if (tab.url !== void 0 && tab.url !== job.url || tab.pendingUrl !== void 0 && tab.pendingUrl !== job.url || !isRecord(confirmation) || !confirmation.ok || confirmation.url !== job.url) {
       throw new StopOperation("document-changed");
     }
-    if (requireAd && confirmation.adShowing !== true) throw new StopOperation("ad-not-showing");
+    if (requireContinue && confirmation.continueAvailable !== true) throw new StopOperation("target-unavailable");
+    if (!requireContinue && confirmation.adShowing !== true) throw new StopOperation("ad-not-showing");
     return settings;
   }
   function maxReloads(value) {
@@ -356,7 +402,7 @@
   async function reloadAd(job, resumeTime) {
     const timer = setTimeout(() => stop(job, "timeout"), RELOAD_OPERATION_TIMEOUT_MS);
     try {
-      const settings = await checkDocumentAndForeground(job, true);
+      const settings = await checkDocumentAndPlayback(job);
       const reservation = await step(job, () => withReloadState(job.tabId, async () => {
         let record;
         try {
@@ -400,7 +446,7 @@
         return { ok: true };
       }));
       if (!reservation.ok) return reservation;
-      const latestSettings = await checkDocumentAndForeground(job, true);
+      const latestSettings = await checkDocumentAndPlayback(job);
       if (job.reloadCount !== void 0 && job.reloadCount > maxReloads(latestSettings.maxReloads)) {
         throw new StopOperation("reload-limit");
       }
@@ -435,7 +481,7 @@
   }
   async function currentTarget(job) {
     const result = await command(job, "Runtime.evaluate", {
-      expression: TARGET_EXPRESSION,
+      expression: job.kind === "continue-video" ? CONTINUE_EXPRESSION : TARGET_EXPRESSION,
       returnByValue: true
     });
     const evaluation = isRecord(result) && isRecord(result.result) ? result.result : void 0;
@@ -449,7 +495,7 @@
     let response;
     const timer = setTimeout(() => stop(job, "timeout"), OPERATION_TIMEOUT_MS);
     try {
-      await checkDocumentAndForeground(job);
+      await checkDocumentAndPlayback(job);
       ensureRunning(job);
       try {
         await chrome.debugger.attach({ tabId: job.tabId }, "1.3");
@@ -461,10 +507,12 @@
       }
       ensureRunning(job);
       await command(job, "Page.enable");
+      job.focusEmulated = true;
+      await command(job, "Emulation.setFocusEmulationEnabled", { enabled: true });
       await checkFrame(job);
       let target = await currentTarget(job);
       await command(job, "Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y });
-      await checkDocumentAndForeground(job);
+      await checkDocumentAndPlayback(job);
       await checkFrame(job);
       target = await currentTarget(job);
       ensureRunning(job);
@@ -524,7 +572,7 @@
       respond({ ok: false, reason: "disabled" });
       return false;
     }
-    if (jobs.has(tabId) || message.type === "skip-ad" && now - (lastAttempts.get(tabId) ?? -Infinity) < ATTEMPT_COOLDOWN_MS) {
+    if (jobs.has(tabId) || message.type !== "reload-ad" && now - (lastAttempts.get(tabId) ?? -Infinity) < ATTEMPT_COOLDOWN_MS) {
       respond({ ok: false, reason: "busy" });
       return false;
     }
@@ -593,16 +641,6 @@
     const ownReload = job?.kind === "reload-ad" && job.reloading && (!change.url || change.url === job.url);
     if (job && (!ownReload && change.status === "loading" || change.url && change.url !== job.url)) {
       stop(job, "document-changed");
-    }
-  });
-  chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
-    for (const job of jobs.values()) {
-      if (job.windowId === windowId && job.tabId !== tabId) stop(job, "inactive");
-    }
-  });
-  chrome.windows.onFocusChanged.addListener((windowId) => {
-    for (const job of jobs.values()) {
-      if (job.windowId !== windowId) stop(job, "inactive");
     }
   });
   chrome.tabs.onRemoved.addListener((tabId) => {

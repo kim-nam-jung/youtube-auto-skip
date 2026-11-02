@@ -1,6 +1,36 @@
 // Generated from src/*.ts by npm run build. Edit the TypeScript source.
 "use strict";
 (() => {
+  // src/continue-dialog.ts
+  function findContinueTarget() {
+    const url = new URL(location.href);
+    if (url.origin !== "https://www.youtube.com" || url.pathname !== "/watch" || !url.searchParams.get("v")) return null;
+    const video = document.querySelector(".html5-video-player video");
+    if (!video || video.paused !== true || video.ended === true) return null;
+    const selector = 'ytd-confirm-dialog-renderer, yt-confirm-dialog-renderer, tp-yt-paper-dialog, [role="dialog"]';
+    for (const dialog of document.querySelectorAll(selector)) {
+      const text = (dialog.textContent || "").replace(/\s+/g, " ").trim();
+      if (!/Video paused\.\s*Continue watching\?/i.test(text) && !/(?:동영상|영상)이 일시\s*중지되었습니다\.\s*계속 시청(?:하시겠어요|할까요)\?/.test(text)) continue;
+      for (const button of dialog.querySelectorAll('button, [role="button"], tp-yt-paper-button')) {
+        const label = (button.textContent || "").replace(/\s+/g, " ").trim();
+        if (!/^(?:확인|예|계속|계속 시청|Yes|Continue|OK)$/i.test(label) || button.closest(selector) !== dialog || !button.isConnected || button.matches(":disabled") || button.closest('[hidden], [inert], [aria-disabled="true"], [aria-hidden="true"]')) continue;
+        const style = getComputedStyle(button);
+        if (style.visibility !== "visible" || style.pointerEvents === "none" || !button.getClientRects().length) continue;
+        let hidden = false;
+        for (let ancestor = button; ancestor; ancestor = ancestor.parentElement) {
+          const css = getComputedStyle(ancestor);
+          if (css.display === "none" || css.contentVisibility === "hidden" || Number(css.opacity) === 0) hidden = true;
+        }
+        if (hidden) continue;
+        const r = button.getBoundingClientRect(), x = r.x + r.width / 2, y = r.y + r.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        if (r.width <= 0 || r.height <= 0 || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight || !hit || hit !== button && !button.contains(hit)) continue;
+        return { x, y, href: location.href };
+      }
+    }
+    return null;
+  }
+
   // src/content.ts
   (() => {
     "use strict";
@@ -14,6 +44,7 @@
       return typeof value === "number" && Number.isFinite(value) && value > 0;
     }
     const PLAYER_SELECTOR = ".html5-video-player";
+    const CONTINUE_SELECTOR = 'ytd-confirm-dialog-renderer, yt-confirm-dialog-renderer, tp-yt-paper-dialog, [role="dialog"]';
     const SKIP_SELECTOR = [
       "button.ytp-skip-ad-button",
       "button.ytp-ad-skip-button-modern",
@@ -28,6 +59,7 @@
     const MAIN_VIDEO_SETTLE_MS = 500;
     const RESUME_TIMEOUT_MS = 15e3;
     const VISUAL_EVENTS = ["transitionstart", "transitionend", "animationstart", "animationend"];
+    const MEDIA_EVENTS = ["timeupdate", "loadedmetadata", "loadeddata", "playing", "play", "seeked"];
     const SCRIPT_VERSION = chrome.runtime.getManifest().version;
     const RESULT_REASONS = /* @__PURE__ */ new Set([
       "ok",
@@ -75,13 +107,19 @@
         return;
       }
       if (message?.type !== "confirm-skip-document") return;
-      const adShowing = Boolean(document.querySelector(
+      const adPlayers = Array.from(document.querySelectorAll(
         ".html5-video-player.ad-showing, .html5-video-player.ad-interrupting"
       ));
+      const adShowing = adPlayers.length > 0;
+      const playingAd = adPlayers.some(isPlaying);
+      const continueAvailable = message.requireContinue === true && findContinueTarget() !== null;
       respond({
-        ok: enabled && location.href === message.url && document.visibilityState === "visible" && document.hasFocus() && (!message.requireAd || adShowing),
+        ok: enabled && location.href === message.url && (message.requireContinue === true ? continueAvailable : isForeground() || playingAd) && (!message.requireAd || adShowing),
         url: location.href,
-        adShowing
+        adShowing,
+        playingAd,
+        foreground: isForeground(),
+        continueAvailable
       });
     });
     function watchVideoId() {
@@ -95,6 +133,13 @@
     }
     function isCurrent(state) {
       return enabled && videoState === state && watchVideoId() === state.id;
+    }
+    function isForeground() {
+      return document.visibilityState === "visible" && document.hasFocus();
+    }
+    function isPlaying(player) {
+      const video = player.querySelector("video.html5-main-video") || player.querySelector("video");
+      return Boolean(player.isConnected && video && video.paused === false && video.ended === false && video.readyState >= 2);
     }
     function recordResult(state, operation, value, fallback = "no-response") {
       if (!isCurrent(state)) return;
@@ -115,6 +160,8 @@
         focused: document.hasFocus(),
         players: currentPlayers.length,
         adPlayers: currentPlayers.filter((player) => player.matches(".ad-showing, .ad-interrupting")).length,
+        playingAd: currentPlayers.some((player) => player.matches(".ad-showing, .ad-interrupting") && isPlaying(player)),
+        continueAvailable: findContinueTarget() !== null,
         skipButtons: candidates.length,
         eligibleSkipButtons: candidates.filter((button) => canClick(button, button.closest(PLAYER_SELECTOR))).length,
         state: current ? {
@@ -144,7 +191,7 @@
       state.nextReloadAttempt = Math.max(state.nextReloadAttempt, state.nextStateReadAt);
     }
     function readReloadState(state) {
-      if (!state || !isCurrent(state) || state.ready || state.stateReadInFlight || document.visibilityState !== "visible" || !document.hasFocus() || Date.now() < state.nextStateReadAt) return;
+      if (!state || !isCurrent(state) || state.ready || state.stateReadInFlight || Date.now() < state.nextStateReadAt) return;
       state.stateReadInFlight = true;
       state.nextStateReadAt = Date.now() + STATE_READ_RETRY_MS;
       let request;
@@ -226,7 +273,7 @@
           completeResume(state);
         } else {
           state.mainReadySince ??= Date.now();
-          if (Date.now() - state.mainReadySince < MAIN_VIDEO_SETTLE_MS || document.visibilityState !== "visible" || !document.hasFocus() || video.seeking || state.resumeTime > video.duration) return;
+          if (Date.now() - state.mainReadySince < MAIN_VIDEO_SETTLE_MS || video.seeking || state.resumeTime > video.duration) return;
           const target = Math.min(state.resumeTime, Math.max(0, video.duration - 0.25));
           try {
             if (video.currentTime + 1 < target) video.currentTime = target;
@@ -300,7 +347,7 @@
       return bounds.width > 0 && bounds.height > 0 && x >= 0 && y >= 0 && x < innerWidth && y < innerHeight && hit !== null && (hit === button || button.contains(hit));
     }
     function scanPlayers() {
-      if (!enabled || requestInFlight || document.visibilityState !== "visible" || !document.hasFocus() || location.pathname !== "/watch") return;
+      if (!enabled || requestInFlight || location.pathname !== "/watch") return;
       try {
         if (!chrome.runtime.id) {
           stop();
@@ -311,7 +358,16 @@
         return;
       }
       const state = syncVideoState();
-      if (state) state.lastForeground = {
+      if (state && !state.reloading && Date.now() >= (state.nextContinueAttempt || 0) && findContinueTarget()) {
+        state.nextContinueAttempt = Date.now() + 3e3;
+        const request = { state };
+        requestInFlight = request;
+        chrome.runtime.sendMessage({ type: "continue-video", url: location.href }).then((reply) => recordResult(state, "continue-video", reply)).catch(() => recordResult(state, "continue-video", void 0, "message-failed")).finally(() => {
+          if (requestInFlight === request) requestInFlight = void 0;
+        });
+        return;
+      }
+      if (state && isForeground()) state.lastForeground = {
         at: Date.now(),
         adPlayers: [...players.keys()].filter((player) => player.isConnected && player.matches(".ad-showing, .ad-interrupting")).length
       };
@@ -320,6 +376,7 @@
         if (!player.isConnected) continue;
         inspectMainVideo(player, state);
         if (!player.matches(".ad-showing, .ad-interrupting")) continue;
+        if (!isForeground() && !isPlaying(player)) continue;
         if (state.ready && !state.refreshUnavailable && state.reloadCount < maxReloads) {
           if (Date.now() >= state.nextReloadAttempt) requestReload(state);
           return;
@@ -365,7 +422,8 @@
       return element.matches(selector) || element.querySelector(selector) !== null;
     }
     function discoverPlayers(records) {
-      if (!enabled || !watchVideoId() || document.visibilityState !== "visible" || !document.hasFocus()) return;
+      if (!enabled || !watchVideoId()) return;
+      if (records.some((mutation) => mutation.target.nodeType === 1 && mutation.target.closest(CONTINUE_SELECTOR) || [...mutation.addedNodes].some((node) => containsElement(node, CONTINUE_SELECTOR)))) scheduleScan();
       if ([...players.keys()].some((player) => !player.isConnected)) {
         scheduleReconcile();
         return;
@@ -393,7 +451,7 @@
       return target !== null && "nodeType" in target && target.nodeType === 1;
     }
     function onVisualTransition(event) {
-      if (!enabled || document.visibilityState !== "visible" || !document.hasFocus() || !isElementTarget(event.target)) return;
+      if (!enabled || !isElementTarget(event.target)) return;
       const target = event.target;
       const player = target.closest(PLAYER_SELECTOR);
       if (!player || !players.has(player) || !player.matches(".ad-showing, .ad-interrupting") || target !== player && !target.closest(SKIP_SELECTOR) && !target.querySelector(SKIP_SELECTOR)) return;
@@ -451,13 +509,14 @@
           const current = syncVideoState();
           if (event.type === "loadedmetadata" && current && !player.matches(".ad-showing, .ad-interrupting")) mediaVideoId = current.id;
           inspectMainVideo(player, current);
+          if (player.matches(".ad-showing, .ad-interrupting")) scheduleScan();
         };
-        for (const type of ["timeupdate", "loadedmetadata", "seeked"]) video.addEventListener(type, sample);
+        for (const type of MEDIA_EVENTS) video.addEventListener(type, sample);
         videos.set(video, sample);
       }
       for (const [video, sample] of videos) {
         if (currentVideos.has(video)) continue;
-        for (const type of ["timeupdate", "loadedmetadata", "seeked"]) video.removeEventListener(type, sample);
+        for (const type of MEDIA_EVENTS) video.removeEventListener(type, sample);
         videos.delete(video);
       }
       scheduleScan();
@@ -479,7 +538,7 @@
       for (const observer of players.values()) observer.disconnect();
       players.clear();
       for (const [video, sample] of videos) {
-        for (const type of ["timeupdate", "loadedmetadata", "seeked"]) video.removeEventListener(type, sample);
+        for (const type of MEDIA_EVENTS) video.removeEventListener(type, sample);
       }
       videos.clear();
     }
@@ -489,7 +548,12 @@
       if (!enabled) return;
       for (const type of VISUAL_EVENTS) document.addEventListener(type, onVisualTransition, true);
       discoveryObserver = new MutationObserver(discoverPlayers);
-      discoveryObserver.observe(document, { childList: true, subtree: true });
+      discoveryObserver.observe(document, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["hidden", "opened", "aria-hidden", "style"]
+      });
       reconcilePlayers();
       intervalId = setInterval(reconcilePlayers, 1e3);
     }
@@ -505,9 +569,7 @@
         setEnabled(changes.enabled.newValue !== false);
       }
     });
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") reconcilePlayers();
-    });
+    document.addEventListener("visibilitychange", reconcilePlayers);
     document.addEventListener("yt-navigate-finish", reconcilePlayers);
     window.addEventListener("focus", reconcilePlayers);
     const initialRevision = storageRevision;

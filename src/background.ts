@@ -1,6 +1,7 @@
 "use strict";
+import { findContinueTarget } from "./continue-dialog";
 
-type OperationKind = "skip-ad" | "reload-ad";
+type OperationKind = "skip-ad" | "reload-ad" | "continue-video";
 type RequestKind = OperationKind | "ad-reload-state" | "ad-resume-complete";
 type StopReason = "disabled" | "timeout" | "inactive" | "document-changed" |
   "ad-not-showing" | "reload-state-unavailable" | "reload-limit" |
@@ -43,6 +44,8 @@ interface Job {
   deadline: number;
   attached: boolean;
   pressed: boolean;
+  focusEmulated?: boolean;
+  backgroundPlaybackRequired?: boolean;
   reason?: StopReason;
   frameId?: string;
   loaderId?: string;
@@ -142,13 +145,17 @@ let automationPaused = false;
 // Keep this function self-contained: CDP executes its serialized source.
 function findSkipTarget(): SkipTarget | null {
   if (self !== top || location.origin !== "https://www.youtube.com" ||
-      location.pathname !== "/watch" || document.visibilityState !== "visible") return null;
+      location.pathname !== "/watch") return null;
   const selector = [
     "button.ytp-skip-ad-button", "button.ytp-ad-skip-button-modern", "button.ytp-ad-skip-button",
     '[role="button"].ytp-skip-ad-button', '[role="button"].ytp-ad-skip-button-modern',
     '[role="button"].ytp-ad-skip-button'
   ].join(",");
   for (const player of document.querySelectorAll(".html5-video-player.ad-showing, .html5-video-player.ad-interrupting")) {
+    if (document.visibilityState !== "visible" || !document.hasFocus()) {
+      const video = player.querySelector<HTMLVideoElement>("video.html5-main-video") || player.querySelector("video");
+      if (!video || video.paused !== false || video.ended !== false || video.readyState < 2) continue;
+    }
     for (const button of player.querySelectorAll(selector)) {
       if (!button.isConnected || button.closest(".html5-video-player") !== player ||
           button.matches(":disabled") ||
@@ -176,6 +183,7 @@ function findSkipTarget(): SkipTarget | null {
   return null;
 }
 const TARGET_EXPRESSION = "(" + findSkipTarget.toString() + ")()";
+const CONTINUE_EXPRESSION = "(" + findContinueTarget.toString() + ")()";
 
 class StopOperation extends Error {
   constructor(readonly reason: StopReason) {
@@ -217,7 +225,7 @@ function watchVideoId(value: unknown): string | null {
 
 function permittedRequest(message: unknown): message is ContentRequest {
   return isRecord(message) &&
-    (message.type === "skip-ad" || message.type === "reload-ad" ||
+    (message.type === "skip-ad" || message.type === "reload-ad" || message.type === "continue-video" ||
       message.type === "ad-reload-state" || message.type === "ad-resume-complete") &&
     isWatchUrl(message.url) &&
     (message.type === "skip-ad" || watchVideoId(message.url) !== null);
@@ -279,6 +287,14 @@ async function cleanup(job: Job): Promise<void> {
       }).catch(() => {});
       job.pressed = false;
     }
+    if (job.focusEmulated) {
+      // This affects only the attached renderer, never the OS window or active
+      // tab. Always clear it; detaching also disposes the CDP emulation state.
+      await chrome.debugger.sendCommand({ tabId: job.tabId }, "Emulation.setFocusEmulationEnabled", {
+        enabled: false
+      }).catch(() => {});
+      job.focusEmulated = false;
+    }
     job.ownDetach = true;
     try {
       await chrome.debugger.detach({ tabId: job.tabId });
@@ -298,19 +314,27 @@ async function cleanup(job: Job): Promise<void> {
   return job.cleanupPromise;
 }
 
-async function checkDocumentAndForeground(job: Job, requireAd = false): Promise<Settings> {
+async function checkDocumentAndPlayback(job: Job): Promise<Settings> {
+  const requireContinue = job.kind === "continue-video";
   const [settings, tab, windowInfo, confirmation] = await step(job, () => Promise.all([
     readSettings(),
     chrome.tabs.get(job.tabId),
     chrome.windows.get(job.windowId),
     chrome.tabs.sendMessage<Record<string, unknown>, unknown>(job.tabId, {
-      type: "confirm-skip-document", url: job.url, ...(requireAd ? { requireAd: true } : {})
+      type: "confirm-skip-document", url: job.url,
+      ...(requireContinue ? { requireContinue: true } : { requireAd: true })
     },
       { documentId: job.documentId, frameId: 0 })
   ]));
   if (settings.enabled === false) throw new StopOperation("disabled");
-  if (!tab.active || tab.windowId !== job.windowId || !windowInfo.focused ||
+  if (tab.windowId !== job.windowId ||
       tab.discarded || tab.frozen) throw new StopOperation("inactive");
+  // A background/minimized tab is eligible only while its pinned ad document
+  // reports live playback. CDP input stays in that tab without stealing focus.
+  job.backgroundPlaybackRequired ||= !tab.active || !windowInfo.focused || windowInfo.state === "minimized" ||
+    (isRecord(confirmation) && confirmation.foreground === false);
+  if (!requireContinue && job.backgroundPlaybackRequired &&
+      (!isRecord(confirmation) || confirmation.playingAd !== true)) throw new StopOperation("inactive");
   // Subresources can keep an already valid, visible document "loading".
   // The pinned document reply, URLs and navigation events determine validity.
   // tabs.get may omit URL without the broad tabs permission. CDP below always
@@ -320,7 +344,8 @@ async function checkDocumentAndForeground(job: Job, requireAd = false): Promise<
       !isRecord(confirmation) || !confirmation.ok || confirmation.url !== job.url) {
     throw new StopOperation("document-changed");
   }
-  if (requireAd && confirmation.adShowing !== true) throw new StopOperation("ad-not-showing");
+  if (requireContinue && confirmation.continueAvailable !== true) throw new StopOperation("target-unavailable");
+  if (!requireContinue && confirmation.adShowing !== true) throw new StopOperation("ad-not-showing");
   return settings;
 }
 
@@ -526,7 +551,7 @@ async function discardResume(job: Job): Promise<void> {
 async function reloadAd(job: Job, resumeTime: unknown): Promise<OperationReply> {
   const timer = setTimeout(() => stop(job, "timeout"), RELOAD_OPERATION_TIMEOUT_MS);
   try {
-    const settings = await checkDocumentAndForeground(job, true);
+    const settings = await checkDocumentAndPlayback(job);
     const reservation = await step(job, () => withReloadState(job.tabId, async (): Promise<OperationReply> => {
       let record: ReloadRecord | undefined;
       try {
@@ -567,8 +592,8 @@ async function reloadAd(job: Job, resumeTime: unknown): Promise<OperationReply> 
       return { ok: true };
     }));
     if (!reservation.ok) return reservation;
-    // Saving the guard is asynchronous: verify the live ad, preference and focus again.
-    const latestSettings = await checkDocumentAndForeground(job, true);
+    // Saving the guard is asynchronous: recheck the live ad and playback policy.
+    const latestSettings = await checkDocumentAndPlayback(job);
     if (job.reloadCount !== undefined && job.reloadCount > maxReloads(latestSettings.maxReloads)) {
       throw new StopOperation("reload-limit");
     }
@@ -604,7 +629,7 @@ async function checkFrame(job: Job): Promise<void> {
 
 async function currentTarget(job: Job): Promise<SkipTarget> {
   const result = await command(job, "Runtime.evaluate", {
-    expression: TARGET_EXPRESSION, returnByValue: true
+    expression: job.kind === "continue-video" ? CONTINUE_EXPRESSION : TARGET_EXPRESSION, returnByValue: true
   });
   const evaluation = isRecord(result) && isRecord(result.result) ? result.result : undefined;
   const target = evaluation && isRecord(evaluation.value) ? evaluation.value : undefined;
@@ -619,7 +644,7 @@ async function skip(job: Job): Promise<OperationReply> {
   let response: OperationReply;
   const timer = setTimeout(() => stop(job, "timeout"), OPERATION_TIMEOUT_MS);
   try {
-    await checkDocumentAndForeground(job);
+    await checkDocumentAndPlayback(job);
     ensureRunning(job);
     try {
       await chrome.debugger.attach({ tabId: job.tabId }, "1.3");
@@ -631,12 +656,16 @@ async function skip(job: Job): Promise<OperationReply> {
     }
     ensureRunning(job);
     await command(job, "Page.enable");
+    // Hidden renderers acknowledge mouse commands without delivering a click.
+    // Temporarily enable renderer input without bringing its tab/window forward.
+    job.focusEmulated = true;
+    await command(job, "Emulation.setFocusEmulationEnabled", { enabled: true });
     await checkFrame(job);
     let target = await currentTarget(job);
     await command(job, "Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y });
-    // Hover may change layout. Recheck the live document, preference, focus,
-    // frame/loader, ad state, visibility, and hit target immediately before down.
-    await checkDocumentAndForeground(job);
+    // Hover may change layout. Recheck the live document, preference, playback,
+    // frame/loader, ad state, button visibility and hit target before down.
+    await checkDocumentAndPlayback(job);
     await checkFrame(job);
     target = await currentTarget(job);
     ensureRunning(job);
@@ -690,7 +719,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, respond) => {
     respond({ ok: false, reason: "disabled" });
     return false;
   }
-  if (jobs.has(tabId) || (message.type === "skip-ad" &&
+  if (jobs.has(tabId) || (message.type !== "reload-ad" &&
       now - (lastAttempts.get(tabId) ?? -Infinity) < ATTEMPT_COOLDOWN_MS)) {
     respond({ ok: false, reason: "busy" });
     return false;
@@ -756,16 +785,6 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
     (!change.url || change.url === job.url);
   if (job && ((!ownReload && change.status === "loading") || (change.url && change.url !== job.url))) {
     stop(job, "document-changed");
-  }
-});
-chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
-  for (const job of jobs.values()) {
-    if (job.windowId === windowId && job.tabId !== tabId) stop(job, "inactive");
-  }
-});
-chrome.windows.onFocusChanged.addListener((windowId) => {
-  for (const job of jobs.values()) {
-    if (job.windowId !== windowId) stop(job, "inactive");
   }
 });
 chrome.tabs.onRemoved.addListener((tabId) => {

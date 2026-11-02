@@ -633,10 +633,10 @@ async function eventually(check, description, timeout = 7000) {
     await page.evaluate(() => document.querySelector(".html5-video-player").classList.add("ad-showing"));
     await sleep(1300);
     assert.equal(scenario.loads.get("fixture-hidden"), 1);
-    // Headless visibility can lag a tab switch; the real worker must still
-    // prevent any refresh or trusted input, even if a stale request is sent.
+    // Paused background media must stay untouched even if headless visibility
+    // lags the native tab switch and a stale request is sent.
     assert.equal(await page.evaluate(() => window.fixtureClicks.length), 0);
-    record("background tab prevents refresh and skip");
+    record("paused background tab prevents refresh and skip");
 
     for (const [name, expectedHash] of Object.entries(sourceHashes)) {
       assert.equal(crypto.createHash("sha256").update(await fs.readFile(path.join(extensionRoot, name))).digest("hex"),

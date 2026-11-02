@@ -82,7 +82,9 @@ function harness(options = {}) {
         }
         if (options.beforeConfirm) await options.beforeConfirm({ calls, state, events, sessionData });
         if (options.confirmError) throw new Error("No matching document");
-        return { ok: state.confirmation, url: state.url, adShowing: state.adShowing };
+        return { ok: state.confirmation, url: state.url, adShowing: state.adShowing,
+          playingAd: state.playingAd === true, foreground: state.documentForeground,
+          continueAvailable: state.continueAvailable === true };
       },
       reload: async tabId => {
         calls.reloads.push(tabId);
@@ -91,7 +93,7 @@ function harness(options = {}) {
       },
       onUpdated: events.updated, onActivated: events.activated, onRemoved: events.removed
     },
-    windows: { get: async () => ({ id: 9, focused: state.focused }), onFocusChanged: events.focused },
+    windows: { get: async () => ({ id: 9, focused: state.focused, state: state.windowState || "normal" }), onFocusChanged: events.focused },
     debugger: {
       attach: async target => {
         calls.attach.push(target);
@@ -216,13 +218,124 @@ test("rejects other extensions, subframes, missing documents, inactive documents
   }
 });
 
-test("saved off, inactive tabs, and unfocused windows never attach", async () => {
+test("saved off and paused background tabs or unfocused windows never attach", async () => {
   for (const state of [{ enabled: false }, { active: false }, { focused: false }]) {
     const h = harness({ state });
     assert.equal((await h.request()).ok, false);
     assert.equal(h.calls.attach.length, 0);
     assert.equal(h.mouseEvents().length, 0);
   }
+});
+
+test("playing background tabs and unfocused windows can reload and skip without activating", async () => {
+  for (const state of [{ active: false }, { focused: false }, { active: false, focused: false }]) {
+    for (const type of ["reload-ad", "skip-ad"]) {
+      const h = harness({ state: { ...state, playingAd: true } });
+      assert.equal((await h.request({ type })).ok, true);
+      assert.equal(h.calls.reloads.length, type === "reload-ad" ? 1 : 0);
+      assert.equal(h.mouseEvents().filter(event => event.type === "mouseReleased").length, type === "skip-ad" ? 1 : 0);
+      assert.ok(h.calls.confirms.every(call => call.message.requireAd === true && call.target.documentId === "document-a"));
+    }
+  }
+});
+
+test("background playback stopping during reservation refunds the unissued reload", async () => {
+  const h = harness({ state: { active: false, focused: false, playingAd: true },
+    afterSessionWrite: ({ state }) => { state.playingAd = false; } });
+  const reply = await h.request({ type: "reload-ad" });
+  assert.equal(reply.reason, "inactive");
+  assert.equal(reply.reloadCount, 0);
+  assert.equal(h.calls.reloads.length, 0);
+  assert.equal(h.sessionData["ad-reload:7"], undefined);
+});
+
+test("background playback stopping after hover prevents mouse down", async () => {
+  const h = harness({ state: { active: false, playingAd: true },
+    beforeCommand: ({ method, params }, { state }) => {
+      if (method === "Input.dispatchMouseEvent" && params.type === "mouseMoved") state.playingAd = false;
+    } });
+  assert.equal((await h.request()).reason, "inactive");
+  assert.deepEqual(h.mouseEvents().map(event => event.type), ["mouseMoved"]);
+  assert.equal(h.calls.detach.length, 1);
+  assert.deepEqual(h.calls.commands.filter(item => item.method === "Emulation.setFocusEmulationEnabled")
+    .map(item => item.params.enabled), [true, false]);
+});
+
+test("renderer focus emulation is restored after successful input and rejected input", async () => {
+  for (const fail of [false, true]) {
+    const h = harness({ state: { active: false, playingAd: true },
+      beforeCommand: ({ method, params }) => {
+        if (fail && method === "Input.dispatchMouseEvent" && params.type === "mousePressed") throw new Error("Input failed");
+      } });
+    assert.equal((await h.request()).ok, !fail);
+    assert.deepEqual(h.calls.commands.filter(item => item.method === "Emulation.setFocusEmulationEnabled")
+      .map(item => item.params.enabled), [true, false]);
+    assert.equal(h.calls.detach.length, 1);
+  }
+});
+
+test("tab and app switches do not cancel a verified playing ad", async () => {
+  const h = harness({ state: { playingAd: true }, beforeCommand: ({ method, params }, { state, events }) => {
+    if (method === "Input.dispatchMouseEvent" && params.type === "mouseMoved") {
+      state.active = false;
+      state.focused = false;
+      events.activated.emit({ tabId: 8, windowId: 9 });
+      events.focused.emit(-1);
+    }
+  } });
+  assert.equal((await h.request()).ok, true);
+  assert.deepEqual(h.mouseEvents().map(event => event.type), ["mouseMoved", "mousePressed", "mouseReleased"]);
+});
+
+test("discarded and frozen tabs stay blocked even when stale content reports playing", async () => {
+  for (const tab of [{ discarded: true }, { frozen: true }]) {
+    for (const type of ["reload-ad", "skip-ad"]) {
+      const h = harness({ state: { active: false, playingAd: true, tab } });
+      assert.equal((await h.request({ type })).reason, "inactive");
+      assert.equal(h.calls.reloads.length, 0);
+      assert.equal(h.calls.attach.length, 0);
+    }
+  }
+});
+
+test("minimized windows require playback even when Aside reports window focused", async () => {
+  for (const playingAd of [false, true]) {
+    const h = harness({ state: { active: true, focused: true, windowState: "minimized", playingAd } });
+    assert.equal((await h.request({ type: "reload-ad" })).ok, playingAd);
+  }
+});
+
+test("renderer focus emulation cannot waive the original background playback requirement", async () => {
+  const h = harness({ state: { documentForeground: false, playingAd: true },
+    beforeCommand: ({ method, params }, { state }) => {
+      if (method === "Emulation.setFocusEmulationEnabled" && params.enabled) {
+        state.documentForeground = true;
+        state.playingAd = false;
+      }
+    } });
+  assert.equal((await h.request()).reason, "inactive");
+  assert.ok(h.mouseEvents().every(e => e.type !== "mousePressed"));
+});
+
+test("only a pinned continue-watching prompt may confirm paused background media", async () => {
+  for (const continueAvailable of [false, true]) {
+    const h = harness({ state: { active: false, focused: false, playingAd: false, adShowing: false, continueAvailable } });
+    assert.equal((await h.request({ type: "continue-video" })).ok, continueAvailable);
+    assert.equal(h.calls.attach.length, continueAvailable ? 1 : 0);
+    assert.equal(h.calls.reloads.length, 0);
+    assert.equal(h.calls.sessionWrites.length, 0);
+    assert.ok(h.calls.confirms.every(c => c.message.requireContinue === true && !c.message.requireAd));
+    if (continueAvailable) assert.ok(h.calls.commands.some(c => c.method === "Runtime.evaluate" && c.params.expression.includes("Continue watching")));
+  }
+});
+
+test("a continue-watching dialog disappearing after hover prevents confirmation", async () => {
+  const h = harness({ state: { continueAvailable: true }, beforeCommand: ({ method, params }, { state }) => {
+    if (method === "Input.dispatchMouseEvent" && params.type === "mouseMoved") state.continueAvailable = false;
+  } });
+  assert.equal((await h.request({ type: "continue-video" })).reason, "target-unavailable");
+  assert.deepEqual(h.mouseEvents().map(e => e.type), ["mouseMoved"]);
+  assert.equal(h.calls.detach.length, 1);
 });
 
 test("a stale document with the same URL cannot pass the documentId handshake", async () => {
@@ -334,11 +447,11 @@ test("a main-frame navigation event cancels; a child-frame navigation does not",
   }
 });
 
-test("focus loss or tab navigation after down releases outside the viewport without clicking", async () => {
-  for (const focusLoss of [true, false]) {
+test("tab closure or navigation after down releases outside the viewport without clicking", async () => {
+  for (const closed of [true, false]) {
     const h = harness({ beforeCommand: async ({ method, params }, { events }) => {
       if (method === "Input.dispatchMouseEvent" && params.type === "mousePressed") {
-        if (focusLoss) events.focused.emit(-1);
+        if (closed) events.removed.emit(7);
         else events.updated.emit(7, { status: "loading" });
       }
     } });
