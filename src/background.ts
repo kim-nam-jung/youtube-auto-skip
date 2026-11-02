@@ -131,10 +131,7 @@ interface SkipTarget {
 const OPERATION_TIMEOUT_MS = 2000;
 const RELOAD_OPERATION_TIMEOUT_MS = 10000;
 const ATTEMPT_COOLDOWN_MS = 1500;
-// Reload again as soon as the reloaded page shows an ad. This short spacing only
-// guards against a reload loop; a page load already takes longer than this.
-const RELOAD_INTERVAL_MS = 500;
-const RELOAD_FAILURE_RETRY_MS = 3000;
+const RELOAD_RETRY_MS = 3000;
 const RESUME_LIFETIME_MS = 60000;
 const jobs = new Map<number, Job>();
 const blockedDocuments = new Map<number, string>();
@@ -446,8 +443,12 @@ async function readReloadRecord(tabId: number): Promise<ReloadRecord | undefined
   return record;
 }
 
-function retryAfter(record: ReloadRecord | undefined): number {
-  return record ? Math.max(0, RELOAD_INTERVAL_MS - (Date.now() - record.lastReloadAt)) : 0;
+// A new document showing an ad reloads at once; the persisted count limit bounds
+// the total. Only the document that dispatched the last reload waits, in case
+// that reload never navigated away.
+function retryAfter(record: ReloadRecord | undefined, documentId: string): number {
+  return record?.sourceDocumentId === documentId ?
+    Math.max(0, RELOAD_RETRY_MS - (Date.now() - record.lastReloadAt)) : 0;
 }
 
 function validResume(record: ReloadRecord | undefined): record is ReloadRecord & {
@@ -474,7 +475,7 @@ async function reloadState(message: ContentRequest, sender: ContentSender): Prom
         return { ok: true, reloaded: false, reloadCount: 0, retryAfterMs: 0 };
       }
       const result: ReloadStateSuccess = {
-        ok: true, reloaded: true, reloadCount: record.reloadCount, retryAfterMs: retryAfter(record)
+        ok: true, reloaded: true, reloadCount: record.reloadCount, retryAfterMs: retryAfter(record, sender.documentId)
       };
       if (record.resumeTime === undefined && record.resumeExpiresAt === undefined) return result;
       if (validResume(record) && (record.sourceDocumentId === sender.documentId ||
@@ -577,7 +578,7 @@ async function reloadAd(job: Job, resumeTime: unknown): Promise<OperationReply> 
         if (count >= maxReloads(settings.maxReloads)) {
           return { ok: false, reason: "reload-limit", reloadCount: count };
         }
-        const retryAfterMs = retryAfter(record);
+        const retryAfterMs = retryAfter(record, job.documentId);
         if (retryAfterMs > 0) return { ok: false, reason: "retry-later", retryAfterMs, reloadCount: count };
         if (job.videoId === null) throw new StopOperation("reload-state-unavailable");
         const next: ReloadRecord = { videoId: job.videoId, sourceDocumentId: job.documentId,
@@ -619,7 +620,7 @@ async function reloadAd(job: Job, resumeTime: unknown): Promise<OperationReply> 
     await rollbackReloadReservation(job);
     await discardResume(job);
     return { ok: false, reason: error instanceof StopOperation ? error.reason : "failed",
-      retryAfterMs: RELOAD_FAILURE_RETRY_MS,
+      retryAfterMs: RELOAD_RETRY_MS,
       ...(isInteger(job.reloadCount) ? { reloadCount: job.reloadCount } : {}) };
   } finally {
     clearTimeout(timer);
@@ -678,9 +679,10 @@ async function skip(job: Job): Promise<OperationReply> {
     ]);
     await checkFrame(job);
     let target = await currentTarget(job);
-    await command(job, "Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y });
-    // Hover may change layout. Recheck the live document, preference, playback,
-    // frame/loader, ad state, button visibility and hit target before down.
+    // No hover: mouse moves are frame-aligned and a hidden renderer acknowledges
+    // them only after up to a second, while press/release are delivered at once.
+    // Recheck the live document, preference, playback, frame/loader, ad state,
+    // button visibility and hit target with focus emulation active before down.
     await Promise.all([checkDocumentAndPlayback(job), checkFrame(job)]);
     target = await currentTarget(job);
     ensureRunning(job);

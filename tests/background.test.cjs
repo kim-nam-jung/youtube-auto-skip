@@ -107,7 +107,9 @@ function harness(options = {}) {
       },
       sendCommand: async (target, method, params) => {
         calls.commands.push({ target, method, params });
-        if (options.beforeCommand) await options.beforeCommand({ target, method, params }, { calls, state, events });
+        // targetRead numbers live target reads, the hook point between pre-press validations.
+        if (options.beforeCommand) await options.beforeCommand({ target, method, params,
+          targetRead: method === "Runtime.evaluate" ? state.targetReads + 1 : 0 }, { calls, state, events });
         if (method === "Page.getFrameTree") {
           state.frameReads += 1;
           return { frameTree: { frame: { id: "frame-a", loaderId: state.loaderId, url: state.url } } };
@@ -145,7 +147,7 @@ test("uses only fixed CDP commands and the freshly verified target, with pinned 
   const reply = await h.request({ x: 999, y: 999, script: "throw new Error('caller code')" });
   assert.equal(reply.ok, true);
   assert.deepEqual(h.mouseEvents().map(item => [item.type, item.x, item.y]), [
-    ["mouseMoved", 50, 60], ["mousePressed", 100, 60], ["mouseReleased", 100, 60]
+    ["mousePressed", 100, 60], ["mouseReleased", 100, 60]
   ]);
   assert.equal(h.calls.attach.length, 1);
   assert.equal(h.calls.detach.length, 1);
@@ -249,13 +251,13 @@ test("background playback stopping during reservation refunds the unissued reloa
   assert.equal(h.sessionData["ad-reload:7"], undefined);
 });
 
-test("background playback stopping after hover prevents mouse down", async () => {
+test("background playback stopping after the first target read prevents mouse down", async () => {
   const h = harness({ state: { active: false, playingAd: true },
-    beforeCommand: ({ method, params }, { state }) => {
-      if (method === "Input.dispatchMouseEvent" && params.type === "mouseMoved") state.playingAd = false;
+    beforeCommand: ({ method, params, targetRead }, { state }) => {
+      if (targetRead === 1) state.playingAd = false;
     } });
   assert.equal((await h.request()).reason, "inactive");
-  assert.deepEqual(h.mouseEvents().map(event => event.type), ["mouseMoved"]);
+  assert.deepEqual(h.mouseEvents().map(event => event.type), []);
   assert.equal(h.calls.detach.length, 1);
   assert.deepEqual(h.calls.commands.filter(item => item.method === "Emulation.setFocusEmulationEnabled")
     .map(item => item.params.enabled), [true, false]);
@@ -264,7 +266,7 @@ test("background playback stopping after hover prevents mouse down", async () =>
 test("renderer focus emulation is restored after successful input and rejected input", async () => {
   for (const fail of [false, true]) {
     const h = harness({ state: { active: false, playingAd: true },
-      beforeCommand: ({ method, params }) => {
+      beforeCommand: ({ method, params, targetRead }) => {
         if (fail && method === "Input.dispatchMouseEvent" && params.type === "mousePressed") throw new Error("Input failed");
       } });
     assert.equal((await h.request()).ok, !fail);
@@ -275,8 +277,8 @@ test("renderer focus emulation is restored after successful input and rejected i
 });
 
 test("tab and app switches do not cancel a verified playing ad", async () => {
-  const h = harness({ state: { playingAd: true }, beforeCommand: ({ method, params }, { state, events }) => {
-    if (method === "Input.dispatchMouseEvent" && params.type === "mouseMoved") {
+  const h = harness({ state: { playingAd: true }, beforeCommand: ({ method, params, targetRead }, { state, events }) => {
+    if (targetRead === 1) {
       state.active = false;
       state.focused = false;
       events.activated.emit({ tabId: 8, windowId: 9 });
@@ -284,7 +286,7 @@ test("tab and app switches do not cancel a verified playing ad", async () => {
     }
   } });
   assert.equal((await h.request()).ok, true);
-  assert.deepEqual(h.mouseEvents().map(event => event.type), ["mouseMoved", "mousePressed", "mouseReleased"]);
+  assert.deepEqual(h.mouseEvents().map(event => event.type), ["mousePressed", "mouseReleased"]);
 });
 
 test("discarded and frozen tabs stay blocked even when stale content reports playing", async () => {
@@ -307,7 +309,7 @@ test("minimized windows require playback even when Aside reports window focused"
 
 test("renderer focus emulation cannot waive the original background playback requirement", async () => {
   const h = harness({ state: { documentForeground: false, playingAd: true },
-    beforeCommand: ({ method, params }, { state }) => {
+    beforeCommand: ({ method, params, targetRead }, { state }) => {
       if (method === "Emulation.setFocusEmulationEnabled" && params.enabled) {
         state.documentForeground = true;
         state.playingAd = false;
@@ -329,12 +331,12 @@ test("only a pinned continue-watching prompt may confirm paused background media
   }
 });
 
-test("a continue-watching dialog disappearing after hover prevents confirmation", async () => {
-  const h = harness({ state: { continueAvailable: true }, beforeCommand: ({ method, params }, { state }) => {
-    if (method === "Input.dispatchMouseEvent" && params.type === "mouseMoved") state.continueAvailable = false;
+test("a continue-watching dialog disappearing after the first target read prevents confirmation", async () => {
+  const h = harness({ state: { continueAvailable: true }, beforeCommand: ({ method, params, targetRead }, { state }) => {
+    if (targetRead === 1) state.continueAvailable = false;
   } });
   assert.equal((await h.request({ type: "continue-video" })).reason, "target-unavailable");
-  assert.deepEqual(h.mouseEvents().map(e => e.type), ["mouseMoved"]);
+  assert.deepEqual(h.mouseEvents().map(e => e.type), []);
   assert.equal(h.calls.detach.length, 1);
 });
 
@@ -358,14 +360,16 @@ test("Chrome exposing a different current tab URL blocks the request", async () 
   assert.equal(h.calls.attach.length, 0);
 });
 
-test("a changed loader or URL after hover prevents the press and cleans up", async () => {
+test("a changed loader or URL after the first target read prevents the press and cleans up", async () => {
   for (const field of ["loaderId", "url"]) {
-    const h = harness({ beforeCommand: async ({ method, params }, { state }) => {
-      if (method === "Input.dispatchMouseEvent" && params.type === "mouseMoved") {
+    const h = harness({ beforeCommand: async ({ method, params, targetRead }, { state }) => {
+      if (targetRead === 1) {
         state[field] = field === "url" ? "https://www.youtube.com/watch?v=other" : "loader-b";
       }
     } });
-    assert.equal((await h.request()).reason, "document-changed");
+    // The live target read itself reports its new URL; a new loader is caught
+    // by the frame recheck before the press.
+    assert.equal((await h.request()).reason, field === "url" ? "target-unavailable" : "document-changed");
     assert.equal(h.mouseEvents().some(item => item.type === "mousePressed"), false);
     assert.equal(h.calls.detach.length, 1);
   }
@@ -378,9 +382,9 @@ test("a vanished, disabled, or covered current target cannot be clicked", async 
   assert.equal(h.calls.detach.length, 1);
 });
 
-test("settings off during hover aborts before mouse down", async () => {
-  const h = harness({ beforeCommand: async ({ method, params }, { state, events }) => {
-    if (method === "Input.dispatchMouseEvent" && params.type === "mouseMoved") {
+test("settings off before the final target read aborts before mouse down", async () => {
+  const h = harness({ beforeCommand: async ({ method, params, targetRead }, { state, events }) => {
+    if (targetRead === 1) {
       state.enabled = false;
       events.storage.emit({ enabled: { newValue: false } }, "local");
     }
@@ -392,8 +396,8 @@ test("settings off during hover aborts before mouse down", async () => {
 
 test("user debugger cancellation persists off, prevents reattach, and explicit on restores operation", async () => {
   let cancelled = false;
-  const h = harness({ beforeCommand: async ({ method, params }, { events }) => {
-    if (!cancelled && method === "Input.dispatchMouseEvent" && params.type === "mouseMoved") {
+  const h = harness({ beforeCommand: async ({ method, params, targetRead }, { events }) => {
+    if (!cancelled && targetRead === 1) {
       cancelled = true;
       events.detach.emit({ tabId: 7 }, "canceled_by_user");
     }
@@ -435,8 +439,8 @@ test("a timed-out late attach is detached and never dispatches input", async () 
 
 test("a main-frame navigation event cancels; a child-frame navigation does not", async () => {
   for (const child of [false, true]) {
-    const h = harness({ beforeCommand: async ({ method, params }, { events }) => {
-      if (method === "Input.dispatchMouseEvent" && params.type === "mouseMoved") {
+    const h = harness({ beforeCommand: async ({ method, params, targetRead }, { events }) => {
+      if (targetRead === 1) {
         events.debugger.emit({ tabId: 7 }, "Page.frameNavigated", {
           frame: child ? { id: "child", parentId: "frame-a" } : { id: "frame-a" }
         });
@@ -449,7 +453,7 @@ test("a main-frame navigation event cancels; a child-frame navigation does not",
 
 test("tab closure or navigation after down releases outside the viewport without clicking", async () => {
   for (const closed of [true, false]) {
-    const h = harness({ beforeCommand: async ({ method, params }, { events }) => {
+    const h = harness({ beforeCommand: async ({ method, params, targetRead }, { events }) => {
       if (method === "Input.dispatchMouseEvent" && params.type === "mousePressed") {
         if (closed) events.removed.emit(7);
         else events.updated.emit(7, { status: "loading" });
@@ -506,24 +510,22 @@ test("first ad reload saves its guard and playback position before rechecking th
   assert.equal(h.calls.writes.length, 0);
 });
 
-test("reload count and retry interval survive worker restart and watch URL parameter changes", async () => {
+test("reload count and the dispatching document's retry interval survive worker restart and watch URL changes", async () => {
   const sessionData = {};
   const first = harness({ sessionData });
   assert.equal((await first.request({ type: "reload-ad" })).reloading, true);
   const secondUrl = WATCH + "&t=23&list=playlist-a#details";
   const next = harness({ sessionData, state: { url: secondUrl } });
+  const stale = await next.request({ type: "reload-ad" }, { documentId: "document-a" });
+  assert.equal(stale.reason, "retry-later");
+  assert.equal(stale.reloadCount, 1);
+  assert.equal(stale.retryAfterMs, 3000);
+  assert.equal(next.calls.reloads.length, 0);
   const state = await next.request({ type: "ad-reload-state" }, { documentId: "document-b" });
   assert.equal(state.ok, true);
   assert.equal(state.reloaded, true);
   assert.equal(state.reloadCount, 1);
-  assert.equal(state.retryAfterMs, 500);
-  const reply = await next.request({ type: "reload-ad" }, { documentId: "document-b" });
-  assert.equal(reply.ok, false);
-  assert.equal(reply.reason, "retry-later");
-  assert.equal(reply.reloadCount, 1);
-  assert.equal(reply.retryAfterMs, 500);
-  assert.equal(next.calls.reloads.length, 0);
-  next.state.now += 3000;
+  assert.equal(state.retryAfterMs, 0);
   const second = await next.request({ type: "reload-ad" }, { documentId: "document-b" });
   assert.equal(second.reloading, true);
   assert.equal(second.reloadCount, 2);
@@ -782,7 +784,7 @@ test("the default budget allows three spaced reloads then falls back to the trus
     assert.equal(reply.reloadCount, count);
     const state = await h.request({ type: "ad-reload-state" }, { documentId: "after-" + count });
     assert.equal(state.reloadCount, count);
-    assert.equal(state.retryAfterMs, 500);
+    assert.equal(state.retryAfterMs, 0);
     h.state.now += 3000;
   }
   const blocked = await h.request({ type: "reload-ad" }, { documentId: "document-4" });
@@ -852,18 +854,18 @@ test("a lower limit saved during guard persistence prevents that reload and refu
   assert.equal(h.sessionData["ad-reload:7"].resumeTime, undefined);
 });
 
-test("each retry waits only the short loop guard and reports the remaining interval", async () => {
+test("a new document reloads at once while the dispatching document waits three seconds", async () => {
   const h = harness();
   assert.equal((await h.request({ type: "reload-ad" })).reloadCount, 1);
-  for (const [elapsed, remaining] of [[0, 500], [1, 499], [250, 250], [499, 1]]) {
+  for (const [elapsed, remaining] of [[0, 3000], [1, 2999], [1500, 1500], [2999, 1]]) {
     h.state.now = 10000 + elapsed;
     const reply = await h.request({ type: "reload-ad" });
     assert.equal(reply.reason, "retry-later");
     assert.equal(reply.retryAfterMs, remaining);
     assert.equal(reply.reloadCount, 1);
   }
-  h.state.now = 10500;
-  const reply = await h.request({ type: "reload-ad" });
+  h.state.now = 10000;
+  const reply = await h.request({ type: "reload-ad" }, { documentId: "document-b" });
   assert.equal(reply.reloading, true);
   assert.equal(reply.reloadCount, 2);
   assert.equal(h.calls.reloads.length, 2);

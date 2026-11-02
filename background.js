@@ -35,8 +35,7 @@
   var OPERATION_TIMEOUT_MS = 2e3;
   var RELOAD_OPERATION_TIMEOUT_MS = 1e4;
   var ATTEMPT_COOLDOWN_MS = 1500;
-  var RELOAD_INTERVAL_MS = 500;
-  var RELOAD_FAILURE_RETRY_MS = 3e3;
+  var RELOAD_RETRY_MS = 3e3;
   var RESUME_LIFETIME_MS = 6e4;
   var jobs = /* @__PURE__ */ new Map();
   var blockedDocuments = /* @__PURE__ */ new Map();
@@ -312,8 +311,8 @@
     if (!isReloadRecord(record)) throw new StopOperation("reload-state-unavailable");
     return record;
   }
-  function retryAfter(record) {
-    return record ? Math.max(0, RELOAD_INTERVAL_MS - (Date.now() - record.lastReloadAt)) : 0;
+  function retryAfter(record, documentId) {
+    return record?.sourceDocumentId === documentId ? Math.max(0, RELOAD_RETRY_MS - (Date.now() - record.lastReloadAt)) : 0;
   }
   function validResume(record) {
     return record !== void 0 && isFiniteNumber(record.resumeTime) && record.resumeTime > 0 && isFiniteNumber(record.resumeExpiresAt) && Date.now() < record.resumeExpiresAt;
@@ -336,7 +335,7 @@
           ok: true,
           reloaded: true,
           reloadCount: record.reloadCount,
-          retryAfterMs: retryAfter(record)
+          retryAfterMs: retryAfter(record, sender.documentId)
         };
         if (record.resumeTime === void 0 && record.resumeExpiresAt === void 0) return result;
         if (validResume(record) && (record.sourceDocumentId === sender.documentId || record.resumeDeliveredTo === sender.documentId)) return result;
@@ -422,7 +421,7 @@
           if (count >= maxReloads(settings.maxReloads)) {
             return { ok: false, reason: "reload-limit", reloadCount: count };
           }
-          const retryAfterMs = retryAfter(record);
+          const retryAfterMs = retryAfter(record, job.documentId);
           if (retryAfterMs > 0) return { ok: false, reason: "retry-later", retryAfterMs, reloadCount: count };
           if (job.videoId === null) throw new StopOperation("reload-state-unavailable");
           const next = {
@@ -468,7 +467,7 @@
       return {
         ok: false,
         reason: error instanceof StopOperation ? error.reason : "failed",
-        retryAfterMs: RELOAD_FAILURE_RETRY_MS,
+        retryAfterMs: RELOAD_RETRY_MS,
         ...isInteger(job.reloadCount) ? { reloadCount: job.reloadCount } : {}
       };
     } finally {
@@ -520,7 +519,6 @@
       ]);
       await checkFrame(job);
       let target = await currentTarget(job);
-      await command(job, "Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y });
       await Promise.all([checkDocumentAndPlayback(job), checkFrame(job)]);
       target = await currentTarget(job);
       ensureRunning(job);
