@@ -1,0 +1,62 @@
+name: Chrome Web Store cancel submission
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact version under review to cancel (for example 1.0.6.9)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+# Never run alongside an upload or submission for the same store item.
+concurrency:
+  group: chrome-web-store-${{ vars.CWS_EXTENSION_ID || 'unconfigured' }}
+  cancel-in-progress: false
+
+jobs:
+  cancel:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Validate required status configuration
+        env:
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+          CWS_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.CWS_WORKLOAD_IDENTITY_PROVIDER }}
+          CWS_SERVICE_ACCOUNT_EMAIL: ${{ vars.CWS_SERVICE_ACCOUNT_EMAIL }}
+        run: |
+          for key in CWS_PUBLISHER_ID CWS_EXTENSION_ID CWS_WORKLOAD_IDENTITY_PROVIDER CWS_SERVICE_ACCOUNT_EMAIL; do
+            if [[ -z "${!key}" ]]; then
+              echo "::error::Missing required Actions variable: $key"
+              exit 1
+            fi
+          done
+      - name: Authenticate for the cancellation
+        id: google-auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.CWS_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.CWS_SERVICE_ACCOUNT_EMAIL }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+          create_credentials_file: false
+          export_environment_variables: false
+      - name: Cancel only the named submission
+        env:
+          CANCEL_VERSION: ${{ inputs.version }}
+          CWS_ACCESS_TOKEN: ${{ steps['google-auth'].outputs.access_token }}
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+        run: node scripts/cancel-cws-submission.mjs
