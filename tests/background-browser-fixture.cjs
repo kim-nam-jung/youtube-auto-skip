@@ -23,11 +23,19 @@ const media = wav();
 function html(reloaded) {
   return `<!doctype html><meta charset="utf-8"><title>Background ad regression fixture</title>
     <style>body{margin:0}.html5-video-player{position:relative;width:640px;height:360px}
-    video{width:640px;height:360px}button{position:absolute;right:20px;bottom:20px;width:140px;height:44px}</style>
+    video{width:640px;height:360px}button{position:absolute;right:20px;bottom:20px;width:140px;height:44px}
+    .ytp-skip-ad-button{transition:opacity .5s cubic-bezier(0,0,.2,1)}
+    .ytp-skip-ad-button[aria-hidden=true]{opacity:0;transition:opacity .1s cubic-bezier(.4,0,1,1)}</style>
     <div class="html5-video-player ${reloaded ? "ad-showing" : ""}">
     <video class="html5-main-video" autoplay loop src="${media}"></video>
-    <button class="ytp-skip-ad-button">Skip ad</button></div>
-    <script>window.fixtureClicks=[];document.querySelector('button').addEventListener('click',e=>{
+    <button class="ytp-skip-ad-button" aria-hidden="true">Skip ad</button></div>
+    <script>window.fixtureClicks=[];
+    // Like YouTube, reveal the skip button after playback by removing
+    // aria-hidden, which starts an opacity fade-in from zero.
+    document.querySelector('video').addEventListener('timeupdate',e=>{
+      if(e.target.currentTime>1)document.querySelector('button').removeAttribute('aria-hidden');
+    });
+    document.querySelector('button').addEventListener('click',e=>{
       window.fixtureClicks.push({trusted:e.isTrusted,visibility:document.visibilityState,focused:document.hasFocus()});
       if(e.isTrusted)document.querySelector('.html5-video-player').classList.remove('ad-showing');
     });</script>`;

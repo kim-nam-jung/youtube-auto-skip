@@ -320,6 +320,15 @@
         scheduleScan();
       });
     }
+    function fadingIn(element) {
+      if (typeof element.getAnimations !== "function") return false;
+      return element.getAnimations().some((animation) => {
+        const effect = animation.effect;
+        if (animation.playState !== "running" || animation.playbackRate <= 0 || typeof effect?.getKeyframes !== "function") return false;
+        const last = effect.getKeyframes().at(-1);
+        return last !== void 0 && "opacity" in last && Number(last.opacity) > 0;
+      });
+    }
     function canClick(button, player) {
       if (!button.isConnected || button.closest(PLAYER_SELECTOR) !== player) {
         return false;
@@ -336,7 +345,7 @@
       }
       for (let element = button; element; element = element.parentElement) {
         const style = getComputedStyle(element);
-        if (style.display === "none" || style.contentVisibility === "hidden" || Number(style.opacity) === 0) {
+        if (style.display === "none" || style.contentVisibility === "hidden" || Number(style.opacity) === 0 && !fadingIn(element)) {
           return false;
         }
       }

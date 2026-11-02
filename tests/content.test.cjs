@@ -751,3 +751,19 @@ test("turning off cancels a pending transition recheck and ignores unrelated ani
   await unrelated.advance(30);
   assert.deepEqual(unrelated.actions(), []);
 });
+
+test("a skip button is clickable while its fade-in transition is still at zero opacity", async () => {
+  const fade = (playState, to) => ({ playState, playbackRate: 1,
+    effect: { getKeyframes: () => [{ opacity: "0" }, { opacity: to }] } });
+  for (const [animations, expected] of [
+    [[fade("running", "1")], ["skip-ad"]],
+    [[], []],
+    [[fade("paused", "1")], []],
+    [[fade("running", "0")], []]
+  ]) {
+    const h = harness({ reloaded: true, state: { buttonOpacity: 0 } });
+    h.button.getAnimations = () => animations;
+    await h.advance(0);
+    assert.deepEqual(h.actions().map(message => message.type), expected);
+  }
+});

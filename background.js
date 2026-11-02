@@ -35,7 +35,8 @@
   var OPERATION_TIMEOUT_MS = 2e3;
   var RELOAD_OPERATION_TIMEOUT_MS = 1e4;
   var ATTEMPT_COOLDOWN_MS = 1500;
-  var RELOAD_INTERVAL_MS = 3e3;
+  var RELOAD_INTERVAL_MS = 500;
+  var RELOAD_FAILURE_RETRY_MS = 3e3;
   var RESUME_LIFETIME_MS = 6e4;
   var jobs = /* @__PURE__ */ new Map();
   var blockedDocuments = /* @__PURE__ */ new Map();
@@ -53,6 +54,12 @@
       '[role="button"].ytp-ad-skip-button-modern',
       '[role="button"].ytp-ad-skip-button'
     ].join(",");
+    const fadingIn = (element) => typeof element.getAnimations === "function" && element.getAnimations().some((animation) => {
+      const effect = animation.effect;
+      if (animation.playState !== "running" || animation.playbackRate <= 0 || typeof effect?.getKeyframes !== "function") return false;
+      const last = effect.getKeyframes().at(-1);
+      return last !== void 0 && "opacity" in last && Number(last.opacity) > 0;
+    });
     for (const player of document.querySelectorAll(".html5-video-player.ad-showing, .html5-video-player.ad-interrupting")) {
       if (document.visibilityState !== "visible" || !document.hasFocus()) {
         const video = player.querySelector("video.html5-main-video") || player.querySelector("video");
@@ -65,7 +72,7 @@
         let hidden = false;
         for (let ancestor = button; ancestor; ancestor = ancestor.parentElement) {
           const ancestorStyle = getComputedStyle(ancestor);
-          if (ancestorStyle.display === "none" || ancestorStyle.contentVisibility === "hidden" || Number(ancestorStyle.opacity) === 0) hidden = true;
+          if (ancestorStyle.display === "none" || ancestorStyle.contentVisibility === "hidden" || Number(ancestorStyle.opacity) === 0 && !fadingIn(ancestor)) hidden = true;
         }
         if (hidden) continue;
         const bounds = button.getBoundingClientRect();
@@ -461,7 +468,7 @@
       return {
         ok: false,
         reason: error instanceof StopOperation ? error.reason : "failed",
-        retryAfterMs: RELOAD_INTERVAL_MS,
+        retryAfterMs: RELOAD_FAILURE_RETRY_MS,
         ...isInteger(job.reloadCount) ? { reloadCount: job.reloadCount } : {}
       };
     } finally {
@@ -506,14 +513,15 @@
         throw new StopOperation("debugger-unavailable");
       }
       ensureRunning(job);
-      await command(job, "Page.enable");
       job.focusEmulated = true;
-      await command(job, "Emulation.setFocusEmulationEnabled", { enabled: true });
+      await Promise.all([
+        command(job, "Page.enable"),
+        command(job, "Emulation.setFocusEmulationEnabled", { enabled: true })
+      ]);
       await checkFrame(job);
       let target = await currentTarget(job);
       await command(job, "Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y });
-      await checkDocumentAndPlayback(job);
-      await checkFrame(job);
+      await Promise.all([checkDocumentAndPlayback(job), checkFrame(job)]);
       target = await currentTarget(job);
       ensureRunning(job);
       job.pressed = true;

@@ -307,6 +307,20 @@ import { findContinueTarget } from "./continue-dialog";
     });
   }
 
+  // YouTube reveals the skip button by removing aria-hidden, which starts an
+  // opacity transition from 0. Hidden/minimized pages render no frames, so that
+  // transition never advances; accept the zero only while it fades in.
+  function fadingIn(element: Element) {
+    if (typeof element.getAnimations !== "function") return false;
+    return element.getAnimations().some(animation => {
+      const effect = animation.effect as KeyframeEffect | null;
+      if (animation.playState !== "running" || animation.playbackRate <= 0 ||
+          typeof effect?.getKeyframes !== "function") return false;
+      const last = effect.getKeyframes().at(-1);
+      return last !== undefined && "opacity" in last && Number(last.opacity) > 0;
+    });
+  }
+
   function canClick(button: Element, player: Element | null) {
     if (!button.isConnected || button.closest(PLAYER_SELECTOR) !== player) {
       return false;
@@ -328,7 +342,7 @@ import { findContinueTarget } from "./continue-dialog";
     for (let element: Element | null = button; element; element = element.parentElement) {
       const style = getComputedStyle(element);
       if (style.display === "none" || style.contentVisibility === "hidden" ||
-          Number(style.opacity) === 0) {
+          (Number(style.opacity) === 0 && !fadingIn(element))) {
         return false;
       }
     }

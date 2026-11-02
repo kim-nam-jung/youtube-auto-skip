@@ -1,6 +1,6 @@
 {
   "name": "youtube-auto-skip",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "private": true,
   "description": "YouTube ad controls for Chrome, with local-only diagnostics",
   "scripts": {

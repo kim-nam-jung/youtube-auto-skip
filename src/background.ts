@@ -131,7 +131,10 @@ interface SkipTarget {
 const OPERATION_TIMEOUT_MS = 2000;
 const RELOAD_OPERATION_TIMEOUT_MS = 10000;
 const ATTEMPT_COOLDOWN_MS = 1500;
-const RELOAD_INTERVAL_MS = 3000;
+// Reload again as soon as the reloaded page shows an ad. This short spacing only
+// guards against a reload loop; a page load already takes longer than this.
+const RELOAD_INTERVAL_MS = 500;
+const RELOAD_FAILURE_RETRY_MS = 3000;
 const RESUME_LIFETIME_MS = 60000;
 const jobs = new Map<number, Job>();
 const blockedDocuments = new Map<number, string>();
@@ -151,6 +154,16 @@ function findSkipTarget(): SkipTarget | null {
     '[role="button"].ytp-skip-ad-button', '[role="button"].ytp-ad-skip-button-modern',
     '[role="button"].ytp-ad-skip-button'
   ].join(",");
+  // A zero opacity is accepted only while a fade-in toward a visible value runs
+  // (YouTube's reveal transition does not advance in hidden pages).
+  const fadingIn = (element: Element) => typeof element.getAnimations === "function" &&
+    element.getAnimations().some(animation => {
+      const effect = animation.effect as KeyframeEffect | null;
+      if (animation.playState !== "running" || animation.playbackRate <= 0 ||
+          typeof effect?.getKeyframes !== "function") return false;
+      const last = effect.getKeyframes().at(-1);
+      return last !== undefined && "opacity" in last && Number(last.opacity) > 0;
+    });
   for (const player of document.querySelectorAll(".html5-video-player.ad-showing, .html5-video-player.ad-interrupting")) {
     if (document.visibilityState !== "visible" || !document.hasFocus()) {
       const video = player.querySelector<HTMLVideoElement>("video.html5-main-video") || player.querySelector("video");
@@ -167,7 +180,7 @@ function findSkipTarget(): SkipTarget | null {
       for (let ancestor: Element | null = button; ancestor; ancestor = ancestor.parentElement) {
         const ancestorStyle = getComputedStyle(ancestor);
         if (ancestorStyle.display === "none" || ancestorStyle.contentVisibility === "hidden" ||
-            Number(ancestorStyle.opacity) === 0) hidden = true;
+            (Number(ancestorStyle.opacity) === 0 && !fadingIn(ancestor))) hidden = true;
       }
       if (hidden) continue;
       const bounds = button.getBoundingClientRect();
@@ -606,7 +619,7 @@ async function reloadAd(job: Job, resumeTime: unknown): Promise<OperationReply> 
     await rollbackReloadReservation(job);
     await discardResume(job);
     return { ok: false, reason: error instanceof StopOperation ? error.reason : "failed",
-      retryAfterMs: RELOAD_INTERVAL_MS,
+      retryAfterMs: RELOAD_FAILURE_RETRY_MS,
       ...(isInteger(job.reloadCount) ? { reloadCount: job.reloadCount } : {}) };
   } finally {
     clearTimeout(timer);
@@ -655,18 +668,20 @@ async function skip(job: Job): Promise<OperationReply> {
       throw new StopOperation("debugger-unavailable");
     }
     ensureRunning(job);
-    await command(job, "Page.enable");
     // Hidden renderers acknowledge mouse commands without delivering a click.
     // Temporarily enable renderer input without bringing its tab/window forward.
+    // Independent setup commands run together to keep the click latency low.
     job.focusEmulated = true;
-    await command(job, "Emulation.setFocusEmulationEnabled", { enabled: true });
+    await Promise.all([
+      command(job, "Page.enable"),
+      command(job, "Emulation.setFocusEmulationEnabled", { enabled: true })
+    ]);
     await checkFrame(job);
     let target = await currentTarget(job);
     await command(job, "Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y });
     // Hover may change layout. Recheck the live document, preference, playback,
     // frame/loader, ad state, button visibility and hit target before down.
-    await checkDocumentAndPlayback(job);
-    await checkFrame(job);
+    await Promise.all([checkDocumentAndPlayback(job), checkFrame(job)]);
     target = await currentTarget(job);
     ensureRunning(job);
     job.pressed = true;

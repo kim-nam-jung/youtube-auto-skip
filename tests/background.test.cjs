@@ -516,12 +516,12 @@ test("reload count and retry interval survive worker restart and watch URL param
   assert.equal(state.ok, true);
   assert.equal(state.reloaded, true);
   assert.equal(state.reloadCount, 1);
-  assert.equal(state.retryAfterMs, 3000);
+  assert.equal(state.retryAfterMs, 500);
   const reply = await next.request({ type: "reload-ad" }, { documentId: "document-b" });
   assert.equal(reply.ok, false);
   assert.equal(reply.reason, "retry-later");
   assert.equal(reply.reloadCount, 1);
-  assert.equal(reply.retryAfterMs, 3000);
+  assert.equal(reply.retryAfterMs, 500);
   assert.equal(next.calls.reloads.length, 0);
   next.state.now += 3000;
   const second = await next.request({ type: "reload-ad" }, { documentId: "document-b" });
@@ -782,7 +782,7 @@ test("the default budget allows three spaced reloads then falls back to the trus
     assert.equal(reply.reloadCount, count);
     const state = await h.request({ type: "ad-reload-state" }, { documentId: "after-" + count });
     assert.equal(state.reloadCount, count);
-    assert.equal(state.retryAfterMs, 3000);
+    assert.equal(state.retryAfterMs, 500);
     h.state.now += 3000;
   }
   const blocked = await h.request({ type: "reload-ad" }, { documentId: "document-4" });
@@ -852,17 +852,17 @@ test("a lower limit saved during guard persistence prevents that reload and refu
   assert.equal(h.sessionData["ad-reload:7"].resumeTime, undefined);
 });
 
-test("each retry waits at least three seconds and reports the remaining interval", async () => {
+test("each retry waits only the short loop guard and reports the remaining interval", async () => {
   const h = harness();
   assert.equal((await h.request({ type: "reload-ad" })).reloadCount, 1);
-  for (const [elapsed, remaining] of [[0, 3000], [1, 2999], [1500, 1500], [2999, 1]]) {
+  for (const [elapsed, remaining] of [[0, 500], [1, 499], [250, 250], [499, 1]]) {
     h.state.now = 10000 + elapsed;
     const reply = await h.request({ type: "reload-ad" });
     assert.equal(reply.reason, "retry-later");
     assert.equal(reply.retryAfterMs, remaining);
     assert.equal(reply.reloadCount, 1);
   }
-  h.state.now = 13000;
+  h.state.now = 10500;
   const reply = await h.request({ type: "reload-ad" });
   assert.equal(reply.reloading, true);
   assert.equal(reply.reloadCount, 2);

@@ -147,8 +147,8 @@ async function eventually(check, description, timeout = 7000) {
       const times = (scenario.loadTimes.get(id) || []).slice(1);
       // Observe full document requests; allow 50ms for request-dispatch timing.
       for (let index = 1; index < times.length; index += 1) {
-        assert.ok(times[index] - times[index - 1] >= 2950,
-          "Automatic reload interval was shorter than the 3-second policy");
+        assert.ok(times[index] - times[index - 1] >= 450,
+          "Automatic reload interval was shorter than the 500ms loop guard");
       }
     };
     const waitForSkip = async (page, id, limit) => {
