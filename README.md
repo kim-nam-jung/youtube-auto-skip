@@ -111,9 +111,9 @@ node --test tests/*.test.mjs tests/*.test.cjs
 
 ## Git push로 배포
 
-저장소: https://github.com/knj-arch/youtube-auto-skip
+저장소: https://github.com/kim-nam-jung/youtube-auto-skip
 
-공개 개인정보 처리방침: https://knj-arch.github.io/youtube-auto-skip/
+공개 개인정보 처리방침: https://kim-nam-jung.github.io/youtube-auto-skip/
 
 `main` 브랜치에 관련 파일을 push하면 GitHub Actions가 아래 작업을 수행합니다.
 

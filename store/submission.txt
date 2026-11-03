@@ -55,7 +55,7 @@ debugger 권한은 Chrome의 페이지 디버거 접근 및 모든 웹사이트�
 JavaScript는 확장 프로그램 패키지에 포함됩니다. 외부 서버에서 코드를 내려받아 실행하는 기능이 없습니다.
 
 개인정보 처리방침 URL
-https://knj-arch.github.io/youtube-auto-skip/
+https://kim-nam-jung.github.io/youtube-auto-skip/
 이 주소는 main push 후 GitHub Pages에서 store/privacy.html을 게시합니다. 로그인 없이 열리는지 확인한 뒤 대시보드에 입력하세요. 로컬 파일 경로나 ZIP 다운로드 주소를 처리방침 주소로 입력하지 마세요.
 
 데이터 사용 공개 항목 권고

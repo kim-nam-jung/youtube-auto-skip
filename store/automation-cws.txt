@@ -172,9 +172,9 @@ main 브랜치 실행이 OIDC로 전용 서비스 계정을 가장하여 단기 
     projects/201518632423/locations/global/workloadIdentityPools/github-actions/providers/github-main
   서비스 계정:
     github-cws-publisher@knj-youtube-auto-skip-cws.iam.gserviceaccount.com
-  GitHub 저장소: knj-arch/youtube-auto-skip
+  GitHub 저장소: kim-nam-jung/youtube-auto-skip
   GitHub repository_id: 1415784275
-  GitHub repository_owner_id: 326460992
+  GitHub repository_owner_id: 217230287
 
 Chrome Web Store API, IAM Service Account Credentials API, Security Token Service
 API를 필요한 프로젝트에서 사용 설정합니다. issuer는

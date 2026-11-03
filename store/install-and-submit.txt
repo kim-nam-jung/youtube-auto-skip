@@ -32,7 +32,7 @@ store/submission.txt에서 소개, 단일 목적, 권한 사유와 데이터 처
 
 5. 개인정보처리방침 URL
 store/privacy.html은 main push 후 GitHub Pages 워크플로가 공개 HTTPS 문서로 게시합니다.
-게시 주소: https://knj-arch.github.io/youtube-auto-skip/
+게시 주소: https://kim-nam-jung.github.io/youtube-auto-skip/
 GitHub Actions의 Publish privacy policy 실행이 성공하고 위 주소가 로그인 없이 열리는지 확인한 뒤 대시보드에 입력합니다.
 로컬 C: 경로나 ZIP 내부의 파일 경로는 온라인 URL로 사용할 수 없습니다.
 본인이 실제 운영하는 방식과 대시보드 공개 내용이 일치하는지 확인하고 데이터 사용 관련 인증 항목을 선택합니다.

@@ -1,5 +1,6 @@
 /dist/
 /.pages-site/
+/.wrangler/
 /node_modules/
 /.env
 /.env.*
